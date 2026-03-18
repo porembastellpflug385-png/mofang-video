@@ -63,6 +63,24 @@ function buildVideoFallbackBody(body) {
   return nextBody;
 }
 
+function buildRequestForModel(body) {
+  const model = body.model || '';
+
+  if (Array.isArray(body.messages) && (model.startsWith('sora') || model.startsWith('veo_'))) {
+    return {
+      path: '/videos',
+      body: buildVideoFallbackBody(body),
+      timeoutMs: 25000,
+    };
+  }
+
+  return {
+    path: '/chat/completions',
+    body,
+    timeoutMs: 300000,
+  };
+}
+
 async function sendJsonRequest(apiUrl, apiKey, body, signal) {
   const response = await fetch(apiUrl, {
     method: 'POST',
@@ -116,24 +134,14 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: `服务端配置错误，请检查 ${model.startsWith('sora') ? 'SORA_' : '默认'} 环境变量` });
     }
 
+    const requestConfig = buildRequestForModel(body);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 300000);
+    const timeout = setTimeout(() => controller.abort(), requestConfig.timeoutMs);
 
-    let apiUrl = `${BASE_URL}/chat/completions`;
-    console.log(`[generate] primary model=${model} → ${apiUrl}`);
+    const apiUrl = `${BASE_URL}${requestConfig.path}`;
+    console.log(`[generate] model=${model} → ${apiUrl}`);
 
-    let { response, text } = await sendJsonRequest(apiUrl, API_KEY, body, controller.signal);
-
-    const canFallbackToVideoApi =
-      Array.isArray(body.messages) &&
-      (model.startsWith('sora') || model.startsWith('veo_'));
-
-    if (!response.ok && canFallbackToVideoApi) {
-      const fallbackBody = buildVideoFallbackBody(body);
-      apiUrl = `${BASE_URL}/videos`;
-      console.log(`[generate] fallback model=${model} → ${apiUrl}`);
-      ({ response, text } = await sendJsonRequest(apiUrl, API_KEY, fallbackBody, controller.signal));
-    }
+    const { response, text } = await sendJsonRequest(apiUrl, API_KEY, requestConfig.body, controller.signal);
 
     clearTimeout(timeout);
 
