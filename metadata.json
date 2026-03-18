@@ -1,0 +1,5 @@
+{
+  "name": "AI Video Generator",
+  "description": "An image-to-video generation tool supporting multiple models, generation modes, and advanced parameters.",
+  "requestFramePermissions": []
+}
