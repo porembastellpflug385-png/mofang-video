@@ -7,6 +7,20 @@ type Model = 'sora-2' | 'veo_3_1-4K' | 'veo_3_1-fast-4K' | 'grok-video-3-10s' | 
 type GenerationMode = 'first-last' | 'omni';
 type Ratio = '16:9' | '4:3' | '1:1' | '3:4' | '9:16' | '智能模式';
 
+interface ModelConfig {
+  label: string;
+  durations: string[];   // 可选时长，空数组表示只有"默认"
+  qualities: string[];   // 可选清晰度，空数组表示只有"默认"
+}
+
+const MODEL_CONFIGS: Record<Model, ModelConfig> = {
+  'sora-2':            { label: 'Sora 2',              durations: ['4秒', '8秒', '12秒'], qualities: [] },
+  'veo_3_1-4K':        { label: 'Veo 3.1 4K',         durations: [],                      qualities: [] },
+  'veo_3_1-fast-4K':   { label: 'Veo 3.1 Fast 4K',    durations: [],                      qualities: [] },
+  'grok-video-3-10s':  { label: 'Grok Video 3 (10s)',  durations: [],                      qualities: [] },
+  'grok-video-3':      { label: 'Grok Video 3',        durations: [],                      qualities: [] },
+};
+
 interface ImageFile {
   url: string;      // ObjectURL for preview
   base64: string;   // base64 data for API
@@ -26,6 +40,8 @@ interface VideoRecord {
   params: Record<string, string[]>;
   errorMsg?: string;
   taskId?: string;
+  duration?: string;
+  quality?: string;
 }
 
 // ============ Constants ============
@@ -39,14 +55,6 @@ const PARAM_CONFIG = [
   { key: 'picture', title: '画面', options: ['丰富细节', '背景简约'], multi: true },
   { key: 'atmosphere', title: '氛围', options: ['神秘', '宁静', '温馨', '生动', '色彩艳丽'], multi: true },
 ];
-
-const MODEL_DISPLAY: Record<Model, string> = {
-  'sora-2': 'Sora 2',
-  'veo_3_1-4K': 'Veo 3.1 4K',
-  'veo_3_1-fast-4K': 'Veo 3.1 Fast 4K',
-  'grok-video-3-10s': 'Grok Video 3 (10s)',
-  'grok-video-3': 'Grok Video 3',
-};
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_COUNT = 120;
@@ -142,6 +150,18 @@ function extractVideoUrl(data: any): string | null {
   return null;
 }
 
+/** 将比例字符串转为 Sora 的 size 格式 (WxH) */
+function ratioToSize(ratio: Ratio): string {
+  const map: Record<string, string> = {
+    '16:9': '1280x720',
+    '4:3':  '960x720',
+    '1:1':  '720x720',
+    '3:4':  '720x960',
+    '9:16': '720x1280',
+  };
+  return map[ratio] || '1280x720';
+}
+
 const RatioIcon = ({ ratio }: { ratio: string }) => {
   if (ratio === '智能模式') return <Sparkles className="w-4 h-4 mb-1" />;
   const [w, h] = ratio.split(':').map(Number);
@@ -186,6 +206,8 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<Model>('veo_3_1-4K');
   const [mode, setMode] = useState<GenerationMode>('first-last');
   const [ratio, setRatio] = useState<Ratio>('智能模式');
+  const [duration, setDuration] = useState<string>('默认');
+  const [quality, setQuality] = useState<string>('默认');
   const [prompt, setPrompt] = useState('');
   const [firstFrame, setFirstFrame] = useState<ImageFile | null>(null);
   const [lastFrame, setLastFrame] = useState<ImageFile | null>(null);
@@ -202,6 +224,16 @@ export default function App() {
   const lastFrameRef = useRef<HTMLInputElement>(null);
   const omniRef = useRef<HTMLInputElement>(null);
   const pollTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const currentModelConfig = MODEL_CONFIGS[selectedModel];
+
+  const handleModelChange = (model: Model) => {
+    setSelectedModel(model);
+    // 切换模型时重置时长和清晰度
+    const config = MODEL_CONFIGS[model];
+    setDuration(config.durations.length > 0 ? config.durations[0] : '默认');
+    setQuality(config.qualities.length > 0 ? config.qualities[0] : '默认');
+  };
 
   const addToast = useCallback((type: ToastMessage['type'], text: string) => {
     const id = Date.now().toString() + Math.random();
@@ -251,7 +283,7 @@ export default function App() {
     setVideos(prev => prev.map(v => v.id === id ? { ...v, ...updates } : v));
   }, []);
 
-  const startPolling = useCallback((videoId: string, taskId: string) => {
+  const startPolling = useCallback((videoId: string, taskId: string, model: string) => {
     let count = 0;
     const poll = async () => {
       count++;
@@ -262,25 +294,43 @@ export default function App() {
         return;
       }
       try {
-        const res = await fetch(`/api/task?id=${encodeURIComponent(taskId)}`);
+        const res = await fetch(`/api/task?id=${encodeURIComponent(taskId)}&model=${encodeURIComponent(model)}`);
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '查询失败');
+        if (!res.ok) throw new Error(data.error || data.detail || '查询失败');
 
-        const status = data.status || data.data?.status;
-        const videoUrl = data.video_url || data.data?.video_url || extractVideoUrl(data);
+        // 兼容多种返回格式
+        const status = (data.status || data.data?.status || '').toLowerCase();
+        
+        // 提取视频URL —— 兼容各种格式
+        let videoUrl: string | null = null;
+        // Sora 格式: 需要额外请求 /videos/{id}/content 获取下载链接
+        // 但有些中转站会直接在 task_result 中返回
+        videoUrl = data.video_url 
+          || data.data?.video_url 
+          || data.data?.videos?.[0]?.url  // Veo 格式
+          || data.task_result?.video_url
+          || data.task_result?.url
+          || extractVideoUrl(data);
 
-        if (status === 'completed' || status === 'success' || videoUrl) {
-          updateVideo(videoId, { status: 'completed', videoUrl, thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url });
+        if (status === 'completed' || status === 'success' || status === 'Completed') {
+          // 如果还没有 videoUrl，可能需要从 content 端点获取
+          if (!videoUrl && data.id) {
+            // 尝试拼接内容下载 URL
+            videoUrl = `/api/content?id=${encodeURIComponent(data.id)}&model=${encodeURIComponent(model)}`;
+          }
+          updateVideo(videoId, { status: 'completed', videoUrl: videoUrl || undefined, thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url });
           setIsGenerating(false);
           addToast('success', '视频生成完成！');
           return;
         }
         if (status === 'failed' || status === 'error') {
-          updateVideo(videoId, { status: 'failed', errorMsg: data.error || data.message || '生成失败' });
+          const errMsg = data.error?.message || data.error || data.message || data.data?.error || '生成失败';
+          updateVideo(videoId, { status: 'failed', errorMsg: typeof errMsg === 'string' ? errMsg : '生成失败' });
           setIsGenerating(false);
           addToast('error', '视频生成失败');
           return;
         }
+        // queued / in_progress / processing → 继续轮询
         pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
       } catch (err: any) {
         if (count < 5) {
@@ -304,15 +354,53 @@ export default function App() {
     const newVideo: VideoRecord = {
       id: videoId, prompt, model: selectedModel, status: 'generating', createdAt: Date.now(),
       ratio: mode === 'first-last' ? ratio : undefined, mode, params: { ...params },
+      duration: duration !== '默认' ? duration : undefined,
+      quality: quality !== '默认' ? quality : undefined,
     };
     setVideos(prev => [newVideo, ...prev]);
     setIsGenerating(true);
 
     try {
-      const messages = buildMessages(prompt, selectedModel, mode === 'first-last' ? ratio : undefined, mode, params, firstFrame, lastFrame, omniImages);
-      const requestBody: any = { model: selectedModel, messages, max_tokens: 4096 };
-      if (mode === 'first-last' && ratio && ratio !== '智能模式') {
-        requestBody.extra_body = { aspect_ratio: ratio };
+      // 构建完整 prompt（含风格参数标签）
+      const fullPrompt = buildFullPrompt(prompt, params);
+
+      // 构建请求体 —— 发送给 /api/generate，后端会根据 model 路由到正确端点
+      const requestBody: any = {
+        model: selectedModel,
+        prompt: fullPrompt,
+      };
+
+      // Sora 系列参数
+      if (selectedModel.startsWith('sora')) {
+        // seconds: "4秒" -> "4"
+        if (duration !== '默认') {
+          requestBody.seconds = String(parseInt(duration));
+        }
+        // size: ratio -> WxH 格式
+        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+          requestBody.size = ratioToSize(ratio);
+        }
+        // 首帧图片作为 input_reference (需要是 URL 或 base64 data URI)
+        if (firstFrame) {
+          requestBody.input_reference = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+      }
+
+      // Veo / Grok 系列参数
+      if (selectedModel.startsWith('veo') || selectedModel.startsWith('grok-video')) {
+        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+          requestBody.aspect_ratio = ratio;
+        }
+        // 图片参考
+        if (firstFrame) {
+          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+        if (duration !== '默认') {
+          requestBody.duration = parseInt(duration);
+        }
+        if (quality !== '默认') {
+          requestBody.quality = quality;
+        }
       }
 
       const res = await fetch('/api/generate', {
@@ -323,26 +411,26 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      const taskId = data.task_id || data.id || data.data?.task_id;
-      const videoUrl = extractVideoUrl(data) || data.video_url || data.data?.video_url;
+      // 视频 API 通常返回异步任务，需要轮询
+      // 返回格式: { id: "xxx", status: "queued", ... }
+      const taskId = data.id || data.task_id || data.data?.task_id || data.data?.id;
+      
+      // 也可能同步返回了视频URL
+      const videoUrl = data.video_url 
+        || data.data?.video_url 
+        || data.data?.videos?.[0]?.url
+        || extractVideoUrl(data);
 
       if (videoUrl) {
-        updateVideo(videoId, { status: 'completed', videoUrl, thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url });
+        updateVideo(videoId, { status: 'completed', videoUrl });
         setIsGenerating(false);
         addToast('success', '视频生成完成！');
       } else if (taskId) {
         updateVideo(videoId, { taskId });
-        startPolling(videoId, taskId);
+        startPolling(videoId, taskId, selectedModel);
         addToast('info', '任务已提交，正在生成中...');
       } else {
-        const content = data.choices?.[0]?.message?.content;
-        if (content && typeof content === 'string' && content.includes('http')) {
-          updateVideo(videoId, { status: 'completed', videoUrl: content.trim() });
-          setIsGenerating(false);
-          addToast('success', '视频生成完成！');
-        } else {
-          throw new Error('API 返回格式异常，未获取到视频或任务ID');
-        }
+        throw new Error('API 返回格式异常，未获取到视频或任务ID。返回内容：' + JSON.stringify(data).slice(0, 200));
       }
     } catch (err: any) {
       console.error('Generate error:', err);
@@ -358,6 +446,8 @@ export default function App() {
     if (video.mode) setMode(video.mode);
     if (video.ratio) setRatio(video.ratio);
     if (video.params) setParams(video.params);
+    setDuration(video.duration || '默认');
+    setQuality(video.quality || '默认');
     addToast('info', '已恢复参数，请点击生成');
   };
 
@@ -404,10 +494,10 @@ export default function App() {
         {/* Model Selector */}
         <div className="p-5 border-b border-white/10">
           <div className="relative group">
-            <select value={selectedModel} onChange={e => setSelectedModel(e.target.value as Model)}
+            <select value={selectedModel} onChange={e => handleModelChange(e.target.value as Model)}
               className="w-full appearance-none bg-black/40 border border-white/10 text-white py-3 pl-4 pr-10 rounded-2xl focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 text-sm font-medium cursor-pointer transition-all shadow-inner group-hover:bg-black/60">
-              {(Object.keys(MODEL_DISPLAY) as Model[]).map(m => (
-                <option key={m} value={m}>{MODEL_DISPLAY[m]}</option>
+              {(Object.keys(MODEL_CONFIGS) as Model[]).map(m => (
+                <option key={m} value={m}>{MODEL_CONFIGS[m].label}</option>
               ))}
             </select>
             <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-cyan-400 pointer-events-none group-hover:text-cyan-300 transition-colors" />
@@ -521,6 +611,48 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* Duration & Quality - 根据模型动态显示 */}
+          <div className="flex gap-4">
+            {/* 时长选择 */}
+            <div className="flex-1 space-y-3">
+              <label className="text-xs font-medium text-white/50 uppercase tracking-wider">时长</label>
+              <div className="flex flex-wrap gap-2">
+                {(currentModelConfig.durations.length > 0
+                  ? ['默认', ...currentModelConfig.durations]
+                  : ['默认']
+                ).map(d => (
+                  <button key={d} onClick={() => setDuration(d)}
+                    className={`px-3 py-2 text-xs rounded-xl border transition-all duration-300 font-medium ${
+                      duration === d
+                        ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.15)]'
+                        : 'bg-black/40 border-white/5 text-white/50 hover:border-white/20 hover:text-white/80'
+                    }`}>
+                    {d}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* 清晰度选择 */}
+            <div className="flex-1 space-y-3">
+              <label className="text-xs font-medium text-white/50 uppercase tracking-wider">清晰度</label>
+              <div className="flex flex-wrap gap-2">
+                {(currentModelConfig.qualities.length > 0
+                  ? ['默认', ...currentModelConfig.qualities]
+                  : ['默认']
+                ).map(q => (
+                  <button key={q} onClick={() => setQuality(q)}
+                    className={`px-3 py-2 text-xs rounded-xl border transition-all duration-300 font-medium ${
+                      quality === q
+                        ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.15)]'
+                        : 'bg-black/40 border-white/5 text-white/50 hover:border-white/20 hover:text-white/80'
+                    }`}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Generate Button */}
@@ -575,9 +707,11 @@ export default function App() {
                       <div className="w-10 h-10 shrink-0 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold text-sm shadow-lg">U</div>
                       <div className="space-y-1.5">
                         <div className="flex flex-wrap gap-2 items-center">
-                          <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{MODEL_DISPLAY[video.model] || video.model}</span>
+                          <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{MODEL_CONFIGS[video.model]?.label || video.model}</span>
                           {video.ratio && <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{video.ratio}</span>}
                           <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{video.mode === 'omni' ? '全能参考' : '首尾帧'}</span>
+                          {video.duration && <span className="text-xs font-medium bg-violet-500/15 px-2 py-1 rounded-md text-violet-300 border border-violet-500/20">{video.duration}</span>}
+                          {video.quality && <span className="text-xs font-medium bg-amber-500/15 px-2 py-1 rounded-md text-amber-300 border border-amber-500/20">{video.quality}</span>}
                         </div>
                         <p className="text-sm text-white/60 line-clamp-2 leading-relaxed" title={video.prompt}>{video.prompt}</p>
                         {Object.values(video.params).flat().length > 0 && (
