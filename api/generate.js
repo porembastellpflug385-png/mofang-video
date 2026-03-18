@@ -1,11 +1,78 @@
 /**
  * POST /api/generate
  *
- * 为不同模型路由到对应的视频提交端点，优先使用异步任务接口，
- * 避免在 Vercel Hobby 上长时间占用函数执行时间。
+ * 默认保持原有 chat/completions 行为，避免影响已经可用的 grok。
+ * 对 sora / veo 在 chat 端点失败时，自动回退到视频任务端点。
  *
  * 重要：Authorization 不带 Bearer 前缀
  */
+
+function getTextAndImagesFromMessages(messages = []) {
+  const textParts = [];
+  const imageUrls = [];
+
+  for (const message of messages) {
+    const content = message?.content;
+    if (typeof content === 'string') {
+      textParts.push(content);
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (block?.type === 'text' && typeof block.text === 'string') {
+        textParts.push(block.text);
+      }
+      if (block?.type === 'image_url' && typeof block.image_url?.url === 'string') {
+        imageUrls.push(block.image_url.url);
+      }
+    }
+  }
+
+  return {
+    prompt: textParts.join('\n').trim(),
+    imageUrls,
+  };
+}
+
+function extractAspectRatio(prompt = '') {
+  const match = prompt.match(/(16:9|4:3|1:1|3:4|9:16)/);
+  return match ? match[1] : undefined;
+}
+
+function buildVideoFallbackBody(body) {
+  const { prompt, imageUrls } = getTextAndImagesFromMessages(body.messages);
+  const nextBody = {
+    model: body.model,
+    prompt,
+  };
+
+  if (imageUrls[0]) {
+    nextBody.image = imageUrls[0];
+  }
+
+  const aspectRatio = extractAspectRatio(prompt);
+  if (aspectRatio) {
+    nextBody.aspect_ratio = aspectRatio;
+  }
+
+  return nextBody;
+}
+
+async function sendJsonRequest(apiUrl, apiKey, body, signal) {
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': apiKey,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  const text = await response.text();
+  return { response, text };
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -22,53 +89,39 @@ export default async function handler(req, res) {
   try {
     const body = req.body;
     const model = body.model || '';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300000);
 
-    let path = '/chat/completions';
-    if (model.startsWith('sora')) {
-      path = '/videos';
-    } else if (model.startsWith('veo_')) {
-      path = '/videos';
-    } else if (model.startsWith('veo')) {
-      path = '/videos/generations';
-    } else if (model.startsWith('grok-video')) {
-      path = '/videos/generations';
-    } else if (body.prompt && !Array.isArray(body.messages)) {
-      path = '/videos/generations';
+    let apiUrl = `${BASE_URL}/chat/completions`;
+    console.log(`[generate] primary model=${model} → ${apiUrl}`);
+
+    let { response, text } = await sendJsonRequest(apiUrl, API_KEY, body, controller.signal);
+
+    const canFallbackToVideoApi =
+      Array.isArray(body.messages) &&
+      (model.startsWith('sora') || model.startsWith('veo_'));
+
+    if (!response.ok && canFallbackToVideoApi) {
+      const fallbackBody = buildVideoFallbackBody(body);
+      apiUrl = `${BASE_URL}/videos`;
+      console.log(`[generate] fallback model=${model} → ${apiUrl}`);
+      ({ response, text } = await sendJsonRequest(apiUrl, API_KEY, fallbackBody, controller.signal));
     }
 
-    const apiUrl = `${BASE_URL}${path}`;
-
-    console.log(`[generate] model=${model} → ${apiUrl}`);
-
-    const controller = new AbortController();
-    // 提交任务本身应尽快返回，避免免费版函数超时。
-    const timeout = setTimeout(() => controller.abort(), 25000);
-
-    const apiResponse = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': API_KEY,  // 不带 Bearer
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
     clearTimeout(timeout);
-    const responseText = await apiResponse.text();
 
-    if (!apiResponse.ok) {
-      console.error(`[generate] Error ${apiResponse.status}:`, responseText.slice(0, 500));
-      return res.status(apiResponse.status).json({
-        error: `API 请求失败 (${apiResponse.status})`,
-        detail: responseText.slice(0, 500),
+    if (!response.ok) {
+      console.error(`[generate] Error ${response.status}:`, text.slice(0, 500));
+      return res.status(response.status).json({
+        error: `API 请求失败 (${response.status})`,
+        detail: text.slice(0, 500),
       });
     }
 
     try {
-      return res.status(200).json(JSON.parse(responseText));
+      return res.status(200).json(JSON.parse(text));
     } catch {
-      return res.status(200).json({ raw: responseText });
+      return res.status(200).json({ raw: text });
     }
   } catch (err) {
     if (err.name === 'AbortError') {
