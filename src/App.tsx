@@ -6,19 +6,23 @@ import { Settings, Image as ImageIcon, Video, Download, Trash2, Plus, X, Chevron
 type Model = 'sora-2' | 'veo_3_1-4K' | 'veo_3_1-fast-4K' | 'grok-video-3-10s' | 'grok-video-3';
 type GenerationMode = 'first-last' | 'omni';
 type Ratio = '16:9' | '4:3' | '1:1' | '3:4' | '9:16' | '智能模式';
+type UiMode = 'basic' | 'pro';
 
 interface ModelConfig {
   label: string;
   durations: string[];   // 可选时长，空数组表示只有"默认"
   qualities: string[];   // 可选清晰度，空数组表示只有"默认"
+  category: string;
+  capabilities: string[];
+  warning?: string;
 }
 
 const MODEL_CONFIGS: Record<Model, ModelConfig> = {
-  'sora-2':            { label: 'Sora 2',              durations: ['4秒', '8秒', '12秒'], qualities: [] },
-  'veo_3_1-4K':        { label: 'Veo 3.1 4K',         durations: [],                      qualities: [] },
-  'veo_3_1-fast-4K':   { label: 'Veo 3.1 Fast 4K',    durations: [],                      qualities: [] },
-  'grok-video-3-10s':  { label: 'Grok Video 3 (10s)',  durations: [],                      qualities: [] },
-  'grok-video-3':      { label: 'Grok Video 3',        durations: [],                      qualities: [] },
+  'sora-2':            { label: 'Sora 2',              durations: ['4秒', '8秒', '12秒'], qualities: [], category: '标准视频', capabilities: ['独立渠道', '支持时长', '适合高质感镜头'] },
+  'veo_3_1-4K':        { label: 'Veo 3.1 4K',         durations: [],                      qualities: [], category: '流式视频', capabilities: ['实时进度', '高保真运镜', '适合广告级镜头'], warning: '当前渠道仅稳定返回进度，最终结果回收依赖上游接口能力。' },
+  'veo_3_1-fast-4K':   { label: 'Veo 3.1 Fast 4K',    durations: [],                      qualities: [], category: '流式视频', capabilities: ['实时进度', '提交更快', '适合高频试片'], warning: '当前渠道仅稳定返回进度，最终结果回收依赖上游接口能力。' },
+  'grok-video-3-10s':  { label: 'Grok Video 3 (10s)',  durations: [],                      qualities: [], category: '快速视频', capabilities: ['链路稳定', '结果直出', '适合批量出片'] },
+  'grok-video-3':      { label: 'Grok Video 3',        durations: [],                      qualities: [], category: '快速视频', capabilities: ['链路稳定', '结果直出', '适合批量出片'] },
 };
 
 interface ImageFile {
@@ -133,7 +137,8 @@ function buildMessages(
     const frameDesc = lastFrame ? '根据提供的首帧和尾帧图片' : '根据提供的首帧图片';
     textPrompt = `${frameDesc}${ratioStr}，生成视频：${fullPrompt}`;
   } else {
-    textPrompt = `根据提供的参考图片，生成视频：${fullPrompt}`;
+    const ratioStr = ratio && ratio !== '智能模式' ? `，输出比例 ${ratio}` : '';
+    textPrompt = `根据提供的参考图片${ratioStr}，生成视频：${fullPrompt}`;
   }
 
   content.push({ type: 'text', text: textPrompt });
@@ -158,6 +163,46 @@ function extractVideoUrl(data: any): string | null {
     if (data.output?.video_url) return data.output.video_url;
   } catch {}
   return null;
+}
+
+function getStatusMeta(video: VideoRecord) {
+  if (video.status === 'queued') {
+    return {
+      label: '排队中',
+      tone: 'text-amber-300 border-amber-500/30 bg-amber-500/10',
+      description: '等待当前模型空闲后自动提交',
+    };
+  }
+
+  if (video.status === 'generating') {
+    if (video.completionId && !video.taskId) {
+      return {
+        label: '流式生成',
+        tone: 'text-cyan-300 border-cyan-500/30 bg-cyan-500/10',
+        description: '正在接收进度，等待上游返回最终结果',
+      };
+    }
+
+    return {
+      label: '生成中',
+      tone: 'text-cyan-300 border-cyan-500/30 bg-cyan-500/10',
+      description: '任务已提交，正在生成视频',
+    };
+  }
+
+  if (video.status === 'completed') {
+    return {
+      label: '已完成',
+      tone: 'text-emerald-300 border-emerald-500/30 bg-emerald-500/10',
+      description: '视频已可预览和下载',
+    };
+  }
+
+  return {
+    label: '失败',
+    tone: 'text-red-300 border-red-500/30 bg-red-500/10',
+    description: video.errorMsg || '任务执行失败，请恢复参数重试',
+  };
 }
 
 function extractTextFromStreamPayload(payload: any): string {
@@ -294,6 +339,7 @@ function Toast({ messages, onDismiss }: { messages: ToastMessage[]; onDismiss: (
 // ============ Main App ============
 
 export default function App() {
+  const [uiMode, setUiMode] = useState<UiMode>('basic');
   const [selectedModel, setSelectedModel] = useState<Model>('veo_3_1-4K');
   const [mode, setMode] = useState<GenerationMode>('first-last');
   const [ratio, setRatio] = useState<Ratio>('智能模式');
@@ -327,6 +373,8 @@ export default function App() {
   const currentModelBusy = Boolean(busyModels[selectedModel]);
   const currentModelQueueCount = videos.filter(video => video.model === selectedModel && video.status === 'queued').length;
   const activeModelCount = Object.keys(busyModels).length;
+  const totalQueuedCount = videos.filter(video => video.status === 'queued').length;
+  const totalGeneratingCount = videos.filter(video => video.status === 'generating').length;
 
   const handleModelChange = (model: Model) => {
     setSelectedModel(model);
@@ -773,7 +821,7 @@ export default function App() {
     const shouldQueue = busyModelsRef.current.has(selectedModel);
     const newVideo: VideoRecord = {
       id: videoId, prompt, model: selectedModel, status: shouldQueue ? 'queued' : 'generating', createdAt: Date.now(),
-      ratio: mode === 'first-last' ? ratio : undefined, mode, params: { ...params },
+      ratio, mode, params: { ...params },
       duration: duration !== '默认' ? duration : undefined,
       quality: quality !== '默认' ? quality : undefined,
     };
@@ -850,6 +898,49 @@ export default function App() {
               ))}
             </select>
             <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-cyan-400 pointer-events-none group-hover:text-cyan-300 transition-colors" />
+          </div>
+          <div className="mt-4 flex gap-3">
+            <button
+              onClick={() => setUiMode('basic')}
+              className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium transition-all ${
+                uiMode === 'basic'
+                  ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-300'
+                  : 'border-white/10 bg-black/20 text-white/55 hover:text-white/80'
+              }`}
+            >
+              基础模式
+            </button>
+            <button
+              onClick={() => setUiMode('pro')}
+              className={`flex-1 rounded-xl border px-3 py-2 text-sm font-medium transition-all ${
+                uiMode === 'pro'
+                  ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-300'
+                  : 'border-white/10 bg-black/20 text-white/55 hover:text-white/80'
+              }`}
+            >
+              专业模式
+            </button>
+          </div>
+          <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-white/90">{currentModelConfig.label}</p>
+                <p className="mt-1 text-xs text-white/45">{currentModelConfig.category}</p>
+              </div>
+              <div className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-300">
+                {uiMode === 'basic' ? '简洁操作' : '完整控制'}
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {currentModelConfig.capabilities.map(capability => (
+                <span key={capability} className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/65">
+                  {capability}
+                </span>
+              ))}
+            </div>
+            {currentModelConfig.warning && (
+              <p className="mt-3 text-[11px] leading-5 text-amber-300/75">{currentModelConfig.warning}</p>
+            )}
           </div>
         </div>
 
@@ -938,28 +1029,37 @@ export default function App() {
             <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
               placeholder={mode === 'omni' ? "描述视频内容，例如：@图1 的角色，正在 @图2 的场景中奔跑..." : "描述视频内容，支持中文和英文..."}
               className="w-full h-36 bg-black/40 border border-white/10 text-white p-4 rounded-2xl resize-none focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 text-sm transition-all shadow-inner placeholder:text-white/30" />
-            <button onClick={() => setShowParams(true)}
-              className="absolute bottom-4 right-4 text-xs bg-white/10 hover:bg-cyan-500/20 hover:text-cyan-300 text-white/70 px-3 py-1.5 rounded-xl transition-all duration-300 flex items-center backdrop-blur-md border border-white/5">
-              <Settings className="w-3.5 h-3.5 mr-1.5" /> 
-              <span className="font-medium">参数设置</span> {getSelectedParamsCount() > 0 && <span className="ml-1.5 bg-cyan-500 text-black font-bold px-1.5 py-0.5 rounded-full text-[10px]">{getSelectedParamsCount()}</span>}
-            </button>
+            {uiMode === 'pro' ? (
+              <button onClick={() => setShowParams(true)}
+                className="absolute bottom-4 right-4 text-xs bg-white/10 hover:bg-cyan-500/20 hover:text-cyan-300 text-white/70 px-3 py-1.5 rounded-xl transition-all duration-300 flex items-center backdrop-blur-md border border-white/5">
+                <Settings className="w-3.5 h-3.5 mr-1.5" /> 
+                <span className="font-medium">参数设置</span> {getSelectedParamsCount() > 0 && <span className="ml-1.5 bg-cyan-500 text-black font-bold px-1.5 py-0.5 rounded-full text-[10px]">{getSelectedParamsCount()}</span>}
+              </button>
+            ) : (
+              <div className="pointer-events-none absolute bottom-4 right-4 rounded-xl border border-white/5 bg-black/35 px-3 py-1.5 text-[11px] text-white/40">
+                基础模式已隐藏高级参数
+              </div>
+            )}
           </div>
 
           {/* Ratio */}
-          {mode === 'first-last' && (
-            <div className="space-y-3">
-              <label className="text-xs font-medium text-white/50 uppercase tracking-wider">生成尺寸</label>
-              <div className="grid grid-cols-3 gap-3">
-                {(['16:9', '4:3', '1:1', '3:4', '9:16', '智能模式'] as Ratio[]).map(r => (
-                  <button key={r} onClick={() => setRatio(r)}
-                    className={`py-2.5 flex flex-col items-center justify-center text-xs rounded-xl border transition-all duration-300 font-medium ${ratio === r ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.15)]' : 'bg-black/40 border-white/5 text-white/50 hover:border-white/20 hover:text-white/80'}`}>
-                    <RatioIcon ratio={r} />
-                    <span className="mt-1">{r}</span>
-                  </button>
-                ))}
-              </div>
+          <div className="space-y-3">
+            <label className="text-xs font-medium text-white/50 uppercase tracking-wider">生成尺寸</label>
+            <div className="grid grid-cols-3 gap-3">
+              {(['16:9', '4:3', '1:1', '3:4', '9:16', '智能模式'] as Ratio[]).map(r => (
+                <button key={r} onClick={() => setRatio(r)}
+                  className={`py-2.5 flex flex-col items-center justify-center text-xs rounded-xl border transition-all duration-300 font-medium ${ratio === r ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.15)]' : 'bg-black/40 border-white/5 text-white/50 hover:border-white/20 hover:text-white/80'}`}>
+                  <RatioIcon ratio={r} />
+                  <span className="mt-1">{r}</span>
+                </button>
+              ))}
             </div>
-          )}
+            {mode === 'omni' && (
+              <p className="text-[11px] text-white/40">
+                全能参考模式下，尺寸会作为生成约束随提示词一起发送。
+              </p>
+            )}
+          </div>
 
           {/* Duration & Quality - 根据模型动态显示 */}
           <div className="flex gap-4">
@@ -982,23 +1082,40 @@ export default function App() {
                 ))}
               </div>
             </div>
-            {/* 清晰度选择 */}
-            <div className="flex-1 space-y-3">
-              <label className="text-xs font-medium text-white/50 uppercase tracking-wider">清晰度</label>
-              <div className="flex flex-wrap gap-2">
-                {(currentModelConfig.qualities.length > 0
-                  ? ['默认', ...currentModelConfig.qualities]
-                  : ['默认']
-                ).map(q => (
-                  <button key={q} onClick={() => setQuality(q)}
-                    className={`px-3 py-2 text-xs rounded-xl border transition-all duration-300 font-medium ${
-                      quality === q
-                        ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.15)]'
-                        : 'bg-black/40 border-white/5 text-white/50 hover:border-white/20 hover:text-white/80'
-                    }`}>
-                    {q}
-                  </button>
-                ))}
+            {uiMode === 'pro' && (
+              <div className="flex-1 space-y-3">
+                <label className="text-xs font-medium text-white/50 uppercase tracking-wider">清晰度</label>
+                <div className="flex flex-wrap gap-2">
+                  {(currentModelConfig.qualities.length > 0
+                    ? ['默认', ...currentModelConfig.qualities]
+                    : ['默认']
+                  ).map(q => (
+                    <button key={q} onClick={() => setQuality(q)}
+                      className={`px-3 py-2 text-xs rounded-xl border transition-all duration-300 font-medium ${
+                        quality === q
+                          ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.15)]'
+                          : 'bg-black/40 border-white/5 text-white/50 hover:border-white/20 hover:text-white/80'
+                      }`}>
+                      {q}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div>
+                <p className="text-[11px] text-white/40">运行模型</p>
+                <p className="mt-1 text-lg font-semibold text-white/90">{activeModelCount}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-white/40">排队任务</p>
+                <p className="mt-1 text-lg font-semibold text-white/90">{totalQueuedCount}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-white/40">生成中</p>
+                <p className="mt-1 text-lg font-semibold text-white/90">{totalGeneratingCount}</p>
               </div>
             </div>
           </div>
