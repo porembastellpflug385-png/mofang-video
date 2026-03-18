@@ -1,9 +1,9 @@
 /**
  * POST /api/generate
- * 
- * 生产队API - 所有视频模型统一走 /chat/completions
- * 返回格式: choices[0].message.content 包含视频URL(markdown格式)
- * 
+ *
+ * 为不同模型路由到对应的视频提交端点，优先使用异步任务接口，
+ * 避免在 Vercel Hobby 上长时间占用函数执行时间。
+ *
  * 重要：Authorization 不带 Bearer 前缀
  */
 
@@ -21,12 +21,26 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body;
-    const apiUrl = `${BASE_URL}/chat/completions`;
+    const model = body.model || '';
 
-    console.log(`[generate] model=${body.model} → ${apiUrl}`);
+    let path = '/chat/completions';
+    if (model.startsWith('sora')) {
+      path = Array.isArray(body.messages) ? '/chat/completions' : '/videos';
+    } else if (model.startsWith('veo_')) {
+      path = '/videos';
+    } else if (model.startsWith('veo') || model.startsWith('grok-video')) {
+      path = '/videos/generations';
+    } else if (body.prompt && !Array.isArray(body.messages)) {
+      path = '/videos/generations';
+    }
+
+    const apiUrl = `${BASE_URL}${path}`;
+
+    console.log(`[generate] model=${model} → ${apiUrl}`);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 300000); // 5分钟超时（视频生成耗时较长）
+    // 提交任务本身应尽快返回，避免免费版函数超时。
+    const timeout = setTimeout(() => controller.abort(), 25000);
 
     const apiResponse = await fetch(apiUrl, {
       method: 'POST',

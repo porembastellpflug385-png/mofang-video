@@ -362,28 +362,59 @@ export default function App() {
 
     try {
       const fullPrompt = buildFullPrompt(prompt, params);
+      let requestBody: any;
 
-      // 所有视频模型统一使用 chat/completions 格式
-      const content: any[] = [];
-
-      // 添加图片（首帧/参考图）
-      if (mode === 'first-last' && firstFrame) {
-        content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
-      }
-      if (mode === 'omni') {
-        for (const img of omniImages) {
-          content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
+      if (selectedModel.startsWith('sora')) {
+        const content: any[] = [];
+        if (firstFrame) {
+          content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
         }
+        if (mode === 'omni') {
+          for (const img of omniImages) {
+            content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
+          }
+        }
+        content.push({ type: 'text', text: fullPrompt });
+
+        requestBody = {
+          model: selectedModel,
+          messages: [{ role: 'user', content }],
+          stream: false,
+        };
+      } else if (selectedModel.startsWith('veo_')) {
+        requestBody = {
+          model: selectedModel,
+          prompt: fullPrompt,
+        };
+        if (firstFrame) {
+          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+          requestBody.aspect_ratio = ratio;
+        }
+      } else if (selectedModel.startsWith('grok-video')) {
+        requestBody = {
+          model: selectedModel,
+          prompt: fullPrompt,
+        };
+        if (firstFrame) {
+          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+      } else {
+        requestBody = {
+          model: selectedModel,
+          prompt: fullPrompt,
+        };
       }
 
-      // 构建 prompt 文本
-      content.push({ type: 'text', text: fullPrompt });
-
-      const requestBody: any = {
-        model: selectedModel,
-        messages: [{ role: 'user', content }],
-        stream: false,
-      };
+      if (duration !== '默认') {
+        const sec = parseInt(duration, 10);
+        requestBody.seconds = sec;
+        requestBody.duration = sec;
+      }
+      if (mode === 'first-last' && ratio && ratio !== '智能模式' && selectedModel.startsWith('sora')) {
+        requestBody.size = ratioToSize(ratio);
+      }
 
       const res = await fetch('/api/generate', {
         method: 'POST',
