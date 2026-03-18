@@ -363,10 +363,8 @@ export default function App() {
     try {
       const fullPrompt = buildFullPrompt(prompt, params);
 
-      // 所有视频模型统一使用 chat/completions 格式
+      // 构建 messages
       const content: any[] = [];
-
-      // 添加图片（首帧/参考图）
       if (mode === 'first-last' && firstFrame) {
         content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
       }
@@ -375,14 +373,12 @@ export default function App() {
           content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
         }
       }
-
-      // 构建 prompt 文本
       content.push({ type: 'text', text: fullPrompt });
 
       const requestBody: any = {
         model: selectedModel,
         messages: [{ role: 'user', content }],
-        stream: false,
+        stream: true, // 后端也会强制 stream，这里保持一致
       };
 
       const res = await fetch('/api/generate', {
@@ -390,50 +386,80 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      // 解析返回 —— 视频 URL 在 choices[0].message.content 中
-      // 格式示例: "视频生成成功\n![image](缩略图URL)\n[点击下载视频](视频URL.mp4)"
-      const msgContent = data.choices?.[0]?.message?.content;
+      if (!res.ok) {
+        const errorText = await res.text();
+        let errorMsg = `请求失败 (${res.status})`;
+        try { errorMsg = JSON.parse(errorText).error || errorMsg; } catch {}
+        throw new Error(errorMsg);
+      }
 
-      if (typeof msgContent === 'string') {
-        // 优先提取 .mp4 链接（从 markdown 格式中）
-        const mp4Match = msgContent.match(/https?:\/\/[^\s"'<>)\]]+\.mp4[^\s"'<>)\]]*/);
-        // 也提取缩略图
-        const thumbMatch = msgContent.match(/!\[.*?\]\((https?:\/\/[^\s"'<>)]+)\)/);
+      // 读取 SSE 流，拼接所有 content delta
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('无法读取响应流');
 
-        if (mp4Match) {
-          updateVideo(videoId, {
-            status: 'completed',
-            videoUrl: mp4Match[0],
-            thumbnailUrl: thumbMatch ? thumbMatch[1] : undefined,
-          });
-          setIsGenerating(false);
-          addToast('success', '视频生成完成！');
-          return;
-        }
+      const decoder = new TextDecoder();
+      let fullContent = '';
+      let buffer = '';
 
-        // 如果没有 .mp4，尝试提取任何 URL
-        const anyUrl = msgContent.match(/https?:\/\/[^\s"'<>)\]]+/);
-        if (anyUrl) {
-          updateVideo(videoId, { status: 'completed', videoUrl: anyUrl[0] });
-          setIsGenerating(false);
-          addToast('success', '视频生成完成！');
-          return;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // 处理 SSE 格式: "data: {...}\n\n"
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // 保留未完成的行
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === 'data: [DONE]') continue;
+          if (!trimmed.startsWith('data: ')) continue;
+
+          try {
+            const json = JSON.parse(trimmed.slice(6));
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) {
+              fullContent += delta;
+            }
+          } catch {
+            // 跳过无法解析的行
+          }
         }
       }
 
-      // 如果 content 里没有 URL，检查是否是异步任务
-      const taskId = data.id || data.task_id;
-      if (taskId && data.status) {
-        updateVideo(videoId, { taskId });
-        startPolling(videoId, taskId, selectedModel);
-        addToast('info', '任务已提交，正在生成中...');
+      // 从完整 content 中提取视频 URL
+      // 格式: "...视频生成成功\n![image](缩略图.jpg)\n[点击下载视频](视频.mp4)"
+      const mp4Match = fullContent.match(/https?:\/\/[^\s"'<>)\]]+\.mp4[^\s"'<>)\]]*/);
+      const thumbMatch = fullContent.match(/!\[.*?\]\((https?:\/\/[^\s"'<>)]+)\)/);
+
+      if (mp4Match) {
+        updateVideo(videoId, {
+          status: 'completed',
+          videoUrl: mp4Match[0],
+          thumbnailUrl: thumbMatch ? thumbMatch[1] : undefined,
+        });
+        setIsGenerating(false);
+        addToast('success', '视频生成完成！');
         return;
       }
 
-      throw new Error('未获取到视频链接。返回：' + JSON.stringify(data).slice(0, 300));
+      // 没有 .mp4，尝试提取任何 URL
+      const anyUrl = fullContent.match(/https?:\/\/[^\s"'<>)\]]+/);
+      if (anyUrl) {
+        updateVideo(videoId, { status: 'completed', videoUrl: anyUrl[0] });
+        setIsGenerating(false);
+        addToast('success', '视频生成完成！');
+        return;
+      }
+
+      // 如果流结束了但没有 URL
+      if (fullContent.includes('失败') || fullContent.includes('error') || fullContent.includes('Error')) {
+        throw new Error('视频生成失败: ' + fullContent.slice(0, 200));
+      }
+
+      throw new Error('未获取到视频链接。返回内容: ' + fullContent.slice(0, 300));
     } catch (err: any) {
       console.error('Generate error:', err);
       updateVideo(videoId, { status: 'failed', errorMsg: err.message });
