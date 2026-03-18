@@ -361,59 +361,40 @@ export default function App() {
     setIsGenerating(true);
 
     try {
-      // 第三方中转站统一使用 chat/completions 格式
-      // 通过 messages 数组传递 prompt 和图片
+      // 使用平台"统一视频格式" → POST /videos/generations
+      // 请求体: { model, prompt, image?, aspect_ratio?, seconds?, size? }
       const fullPrompt = buildFullPrompt(prompt, params);
-
-      // 构建 content 数组（多模态格式）
-      const content: any[] = [];
-
-      // 添加图片
-      if (mode === 'first-last') {
-        if (firstFrame) {
-          content.push({
-            type: 'image_url',
-            image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` },
-          });
-        }
-        if (lastFrame) {
-          content.push({
-            type: 'image_url',
-            image_url: { url: `data:${lastFrame.mimeType};base64,${lastFrame.base64}` },
-          });
-        }
-      } else if (mode === 'omni' && omniImages.length > 0) {
-        for (const img of omniImages) {
-          content.push({
-            type: 'image_url',
-            image_url: { url: `data:${img.mimeType};base64,${img.base64}` },
-          });
-        }
-      }
-
-      // 构建文本 prompt，包含比例、时长等信息
-      let textPrompt = fullPrompt;
-      const metaParts: string[] = [];
-      if (mode === 'first-last' && ratio && ratio !== '智能模式') {
-        metaParts.push(`画面比例: ${ratio}`);
-      }
-      if (duration !== '默认') {
-        metaParts.push(`视频时长: ${duration}`);
-      }
-      if (quality !== '默认') {
-        metaParts.push(`清晰度: ${quality}`);
-      }
-      if (metaParts.length > 0) {
-        textPrompt = `${fullPrompt}\n\n${metaParts.join(', ')}`;
-      }
-
-      content.push({ type: 'text', text: textPrompt });
 
       const requestBody: any = {
         model: selectedModel,
-        messages: [{ role: 'user', content }],
-        stream: false,
+        prompt: fullPrompt,
       };
+
+      // 图片参考（首帧）
+      if (firstFrame) {
+        requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+      }
+
+      // 比例
+      if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+        requestBody.aspect_ratio = ratio;
+        // Sora 需要 size 格式
+        if (selectedModel.startsWith('sora')) {
+          requestBody.size = ratioToSize(ratio);
+        }
+      }
+
+      // 时长 (Sora 用 seconds 字段)
+      if (duration !== '默认') {
+        const sec = parseInt(duration);
+        requestBody.seconds = sec;
+        requestBody.duration = sec;
+      }
+
+      // 清晰度
+      if (quality !== '默认') {
+        requestBody.quality = quality;
+      }
 
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -423,12 +404,13 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      // 解析返回 —— chat/completions 格式的视频生成通常在 choices[0].message.content 中返回视频 URL
-      const taskId = data.id || data.task_id || data.data?.task_id;
-      const videoUrl = extractVideoUrl(data) 
-        || data.video_url 
+      // 统一视频格式返回: { id, status, model, ... }
+      // 异步任务需要轮询
+      const taskId = data.id || data.task_id || data.data?.task_id || data.data?.id;
+      const videoUrl = data.video_url 
         || data.data?.video_url
-        || data.data?.videos?.[0]?.url;
+        || data.data?.videos?.[0]?.url
+        || extractVideoUrl(data);
 
       if (videoUrl) {
         updateVideo(videoId, { status: 'completed', videoUrl });
@@ -439,10 +421,9 @@ export default function App() {
         startPolling(videoId, taskId, selectedModel);
         addToast('info', '任务已提交，正在生成中...');
       } else {
-        // 可能内容就在 choices 里
+        // 也检查 choices 格式（兼容 chat 格式返回）
         const msgContent = data.choices?.[0]?.message?.content;
         if (typeof msgContent === 'string' && msgContent.includes('http')) {
-          // 从文本中提取 URL
           const urlMatch = msgContent.match(/https?:\/\/[^\s"'<>]+/);
           if (urlMatch) {
             updateVideo(videoId, { status: 'completed', videoUrl: urlMatch[0] });
@@ -452,7 +433,7 @@ export default function App() {
             throw new Error('无法从返回内容中提取视频链接');
           }
         } else {
-          throw new Error('API 返回格式异常。返回内容：' + JSON.stringify(data).slice(0, 300));
+          throw new Error('API 返回格式异常。返回：' + JSON.stringify(data).slice(0, 300));
         }
       }
     } catch (err: any) {

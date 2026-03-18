@@ -1,10 +1,13 @@
 /**
  * POST /api/generate
  * 
- * 第三方中转 API 统一走 /chat/completions 端点
- * 通过不同的 model 名称区分视频模型
+ * 生产队API视频生成代理
  * 
- * 请求体直接透传给第三方 API
+ * 路由策略（根据文档 https://m9h9dj1gn2.apifox.cn/ ）：
+ *   - 统一视频格式:  POST {BASE}/videos/generations  (sora/veo/grok 都支持)
+ *   - chat 格式:     POST {BASE}/chat/completions     (备用)
+ * 
+ * 前端发来的 body 直接透传，后端只负责加 Authorization 和选择端点
  */
 
 export default async function handler(req, res) {
@@ -17,15 +20,20 @@ export default async function handler(req, res) {
 
   if (!BASE_URL || !API_KEY) {
     console.error('Missing env: OPENAI_BASE_URL / OPENAI_API_KEY');
-    return res.status(500).json({ error: '服务端配置错误，请检查环境变量 OPENAI_BASE_URL 和 OPENAI_API_KEY' });
+    return res.status(500).json({ error: '服务端配置错误，请检查环境变量' });
   }
 
   try {
     const body = req.body;
-
-    // 统一走 /chat/completions —— 第三方中转站的标准格式
-    const apiUrl = `${BASE_URL}/chat/completions`;
-    console.log(`[generate] model=${body.model} → ${apiUrl}`);
+    const model = body.model || '';
+    
+    // 判断端点：如果 body 中有 messages 数组 → chat/completions
+    // 否则（有 prompt 字段） → videos/generations（统一视频格式）
+    const isChat = Array.isArray(body.messages);
+    const path = isChat ? '/chat/completions' : '/videos/generations';
+    const apiUrl = `${BASE_URL}${path}`;
+    
+    console.log(`[generate] model=${model} format=${isChat ? 'chat' : 'video'} → ${apiUrl}`);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180000);
@@ -41,7 +49,6 @@ export default async function handler(req, res) {
     });
 
     clearTimeout(timeout);
-
     const responseText = await apiResponse.text();
 
     if (!apiResponse.ok) {
@@ -53,8 +60,7 @@ export default async function handler(req, res) {
     }
 
     try {
-      const data = JSON.parse(responseText);
-      return res.status(200).json(data);
+      return res.status(200).json(JSON.parse(responseText));
     } catch {
       return res.status(200).json({ raw: responseText });
     }
