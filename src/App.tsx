@@ -361,47 +361,59 @@ export default function App() {
     setIsGenerating(true);
 
     try {
-      // 构建完整 prompt（含风格参数标签）
+      // 第三方中转站统一使用 chat/completions 格式
+      // 通过 messages 数组传递 prompt 和图片
       const fullPrompt = buildFullPrompt(prompt, params);
 
-      // 构建请求体 —— 发送给 /api/generate，后端会根据 model 路由到正确端点
+      // 构建 content 数组（多模态格式）
+      const content: any[] = [];
+
+      // 添加图片
+      if (mode === 'first-last') {
+        if (firstFrame) {
+          content.push({
+            type: 'image_url',
+            image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` },
+          });
+        }
+        if (lastFrame) {
+          content.push({
+            type: 'image_url',
+            image_url: { url: `data:${lastFrame.mimeType};base64,${lastFrame.base64}` },
+          });
+        }
+      } else if (mode === 'omni' && omniImages.length > 0) {
+        for (const img of omniImages) {
+          content.push({
+            type: 'image_url',
+            image_url: { url: `data:${img.mimeType};base64,${img.base64}` },
+          });
+        }
+      }
+
+      // 构建文本 prompt，包含比例、时长等信息
+      let textPrompt = fullPrompt;
+      const metaParts: string[] = [];
+      if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+        metaParts.push(`画面比例: ${ratio}`);
+      }
+      if (duration !== '默认') {
+        metaParts.push(`视频时长: ${duration}`);
+      }
+      if (quality !== '默认') {
+        metaParts.push(`清晰度: ${quality}`);
+      }
+      if (metaParts.length > 0) {
+        textPrompt = `${fullPrompt}\n\n${metaParts.join(', ')}`;
+      }
+
+      content.push({ type: 'text', text: textPrompt });
+
       const requestBody: any = {
         model: selectedModel,
-        prompt: fullPrompt,
+        messages: [{ role: 'user', content }],
+        stream: false,
       };
-
-      // Sora 系列参数
-      if (selectedModel.startsWith('sora')) {
-        // seconds: "4秒" -> "4"
-        if (duration !== '默认') {
-          requestBody.seconds = String(parseInt(duration));
-        }
-        // size: ratio -> WxH 格式
-        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
-          requestBody.size = ratioToSize(ratio);
-        }
-        // 首帧图片作为 input_reference (需要是 URL 或 base64 data URI)
-        if (firstFrame) {
-          requestBody.input_reference = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
-        }
-      }
-
-      // Veo / Grok 系列参数
-      if (selectedModel.startsWith('veo') || selectedModel.startsWith('grok-video')) {
-        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
-          requestBody.aspect_ratio = ratio;
-        }
-        // 图片参考
-        if (firstFrame) {
-          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
-        }
-        if (duration !== '默认') {
-          requestBody.duration = parseInt(duration);
-        }
-        if (quality !== '默认') {
-          requestBody.quality = quality;
-        }
-      }
 
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -411,15 +423,12 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      // 视频 API 通常返回异步任务，需要轮询
-      // 返回格式: { id: "xxx", status: "queued", ... }
-      const taskId = data.id || data.task_id || data.data?.task_id || data.data?.id;
-      
-      // 也可能同步返回了视频URL
-      const videoUrl = data.video_url 
-        || data.data?.video_url 
-        || data.data?.videos?.[0]?.url
-        || extractVideoUrl(data);
+      // 解析返回 —— chat/completions 格式的视频生成通常在 choices[0].message.content 中返回视频 URL
+      const taskId = data.id || data.task_id || data.data?.task_id;
+      const videoUrl = extractVideoUrl(data) 
+        || data.video_url 
+        || data.data?.video_url
+        || data.data?.videos?.[0]?.url;
 
       if (videoUrl) {
         updateVideo(videoId, { status: 'completed', videoUrl });
@@ -430,7 +439,21 @@ export default function App() {
         startPolling(videoId, taskId, selectedModel);
         addToast('info', '任务已提交，正在生成中...');
       } else {
-        throw new Error('API 返回格式异常，未获取到视频或任务ID。返回内容：' + JSON.stringify(data).slice(0, 200));
+        // 可能内容就在 choices 里
+        const msgContent = data.choices?.[0]?.message?.content;
+        if (typeof msgContent === 'string' && msgContent.includes('http')) {
+          // 从文本中提取 URL
+          const urlMatch = msgContent.match(/https?:\/\/[^\s"'<>]+/);
+          if (urlMatch) {
+            updateVideo(videoId, { status: 'completed', videoUrl: urlMatch[0] });
+            setIsGenerating(false);
+            addToast('success', '视频生成完成！');
+          } else {
+            throw new Error('无法从返回内容中提取视频链接');
+          }
+        } else {
+          throw new Error('API 返回格式异常。返回内容：' + JSON.stringify(data).slice(0, 300));
+        }
       }
     } catch (err: any) {
       console.error('Generate error:', err);

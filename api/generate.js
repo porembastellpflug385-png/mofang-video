@@ -1,11 +1,10 @@
-// @ts-nocheck
 /**
  * POST /api/generate
  * 
- * 根据不同模型路由到正确的视频生成 API 端点
- *   Sora:       POST {BASE}/videos
- *   Veo/Grok:   POST {BASE}/videos/generations
- *   回退:       POST {BASE}/chat/completions
+ * 第三方中转 API 统一走 /chat/completions 端点
+ * 通过不同的 model 名称区分视频模型
+ * 
+ * 请求体直接透传给第三方 API
  */
 
 export default async function handler(req, res) {
@@ -23,37 +22,10 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body;
-    const model = body.model || '';
 
-    // 根据模型选择端点和构建请求体
-    let path, apiBody;
-
-    if (model.startsWith('sora')) {
-      path = '/videos';
-      apiBody = {
-        model: body.model,
-        prompt: body.prompt || '',
-      };
-      if (body.seconds) apiBody.seconds = String(body.seconds);
-      if (body.size) apiBody.size = body.size;
-      if (body.input_reference) apiBody.input_reference = body.input_reference;
-    } else if (model.startsWith('veo') || model.startsWith('grok-video')) {
-      path = '/videos/generations';
-      apiBody = {
-        model: body.model,
-        prompt: body.prompt || '',
-      };
-      if (body.aspectRatio || body.aspect_ratio) apiBody.aspectRatio = body.aspectRatio || body.aspect_ratio;
-      if (body.image) apiBody.image = body.image;
-      if (body.duration) apiBody.duration = body.duration;
-      if (body.quality) apiBody.quality = body.quality;
-    } else {
-      path = '/chat/completions';
-      apiBody = body;
-    }
-
-    const apiUrl = `${BASE_URL}${path}`;
-    console.log(`[generate] ${model} → ${apiUrl}`);
+    // 统一走 /chat/completions —— 第三方中转站的标准格式
+    const apiUrl = `${BASE_URL}/chat/completions`;
+    console.log(`[generate] model=${body.model} → ${apiUrl}`);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180000);
@@ -64,7 +36,7 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${API_KEY}`,
       },
-      body: JSON.stringify(apiBody),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
 
