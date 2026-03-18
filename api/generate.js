@@ -1,21 +1,19 @@
 /**
  * POST /api/generate
  * 
- * Vercel Edge Function — 无 10 秒超时限制
- * Edge Runtime 支持 streaming，可以保持长连接直到第三方 API 返回
+ * Edge Function + 强制 stream: true
  * 
- * Hobby 计划: Edge Functions 没有 10 秒硬限制（CPU 时间限制 30s，但等待 I/O 不算）
+ * 关键：Vercel Hobby 有超时限制，但 streaming 响应不受限
+ * 所以强制开启 stream，将第三方 API 的流式数据实时透传给前端
+ * 前端从 SSE 流中提取最终的视频 URL
  */
 
-export const config = {
-  runtime: 'edge',
-};
+export const config = { runtime: 'edge' };
 
 export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json' },
+      status: 405, headers: { 'Content-Type': 'application/json' },
     });
   }
 
@@ -24,14 +22,16 @@ export default async function handler(req) {
 
   if (!BASE_URL || !API_KEY) {
     return new Response(JSON.stringify({ error: '服务端配置错误' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      status: 500, headers: { 'Content-Type': 'application/json' },
     });
   }
 
   try {
     const body = await req.json();
     const apiUrl = `${BASE_URL}/chat/completions`;
+
+    // 强制开启 stream 以避免超时
+    body.stream = true;
 
     const apiResponse = await fetch(apiUrl, {
       method: 'POST',
@@ -42,41 +42,32 @@ export default async function handler(req) {
       body: JSON.stringify(body),
     });
 
-    // 如果上游返回流式数据，直接透传 stream 给前端
-    if (body.stream && apiResponse.body) {
-      return new Response(apiResponse.body, {
-        status: apiResponse.status,
-        headers: {
-          'Content-Type': apiResponse.headers.get('content-type') || 'text/event-stream',
-          'Cache-Control': 'no-cache',
-        },
-      });
-    }
-
-    // 非流式：等待完整响应后返回
-    const responseText = await apiResponse.text();
-
     if (!apiResponse.ok) {
+      const errorText = await apiResponse.text();
       return new Response(JSON.stringify({
         error: `API 请求失败 (${apiResponse.status})`,
-        detail: responseText.slice(0, 500),
+        detail: errorText.slice(0, 500),
       }), {
         status: apiResponse.status,
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    return new Response(responseText, {
+    // 直接透传 stream 给前端
+    return new Response(apiResponse.body, {
       status: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
     });
   } catch (err) {
     return new Response(JSON.stringify({
       error: '服务器内部错误',
       detail: err.message,
     }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      status: 500, headers: { 'Content-Type': 'application/json' },
     });
   }
 }
