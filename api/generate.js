@@ -28,7 +28,9 @@ export default async function handler(req, res) {
       path = Array.isArray(body.messages) ? '/chat/completions' : '/videos';
     } else if (model.startsWith('veo_')) {
       path = '/videos';
-    } else if (model.startsWith('veo') || model.startsWith('grok-video')) {
+    } else if (model.startsWith('veo')) {
+      path = '/videos/generations';
+    } else if (model.startsWith('grok-video')) {
       path = '/videos/generations';
     } else if (body.prompt && !Array.isArray(body.messages)) {
       path = '/videos/generations';
