@@ -40,6 +40,7 @@ interface VideoRecord {
   params: Record<string, string[]>;
   errorMsg?: string;
   taskId?: string;
+  completionId?: string;
   duration?: string;
   quality?: string;
 }
@@ -188,6 +189,56 @@ function extractTaskId(payload: any): string | null {
   const normalized = candidate.toLowerCase();
   if (normalized.startsWith('chatcmpl') || normalized.startsWith('chatcmp')) return null;
   return candidate;
+}
+
+function extractCompletionId(payload: any): string | null {
+  const candidate = payload?.id || payload?.data?.id || null;
+  if (typeof candidate !== 'string') return null;
+  const normalized = candidate.toLowerCase();
+  if (normalized.startsWith('chatcmpl') || normalized.startsWith('chatcmp')) return candidate;
+  return null;
+}
+
+function normalizeCompletionId(candidate: string | null | undefined): string | null {
+  if (typeof candidate !== 'string') return null;
+  const trimmed = candidate.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.toLowerCase();
+  if (normalized.startsWith('chatcmpl') || normalized.startsWith('chatcmp')) return trimmed;
+  return null;
+}
+
+function extractCompletionIdFromHeaders(headers: Headers): string | null {
+  return (
+    normalizeCompletionId(headers.get('x-request-id')) ||
+    normalizeCompletionId(headers.get('openai-request-id')) ||
+    normalizeCompletionId(headers.get('x-openai-request-id')) ||
+    normalizeCompletionId(headers.get('x-completion-id'))
+  );
+}
+
+function processStreamLine(
+  rawLine: string,
+  onPayload: (payload: any) => void,
+  onText: (text: string) => void,
+  onId?: (id: string) => void,
+) {
+  const line = rawLine.trim();
+  if (line.startsWith('id:')) {
+    const streamId = normalizeCompletionId(line.slice(3).trim());
+    if (streamId) onId?.(streamId);
+    return;
+  }
+  if (!line.startsWith('data:')) return;
+
+  const dataText = line.slice(5).trim();
+  if (!dataText || dataText === '[DONE]') return;
+
+  try {
+    onPayload(JSON.parse(dataText));
+  } catch {
+    onText(dataText);
+  }
 }
 
 /** 将比例字符串转为 Sora 的 size 格式 (WxH) */
@@ -432,6 +483,75 @@ export default function App() {
     pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
   }, [updateVideo, addToast]);
 
+  const startResultPolling = useCallback((videoId: string, completionId: string, model: Model, onSettled: () => void) => {
+    let count = 0;
+    const poll = async () => {
+      count++;
+      if (count > MAX_POLL_COUNT) {
+        updateVideo(videoId, { status: 'failed', errorMsg: '结果查询超时，请重试' });
+        addToast('error', '视频结果查询超时');
+        onSettled();
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/result?id=${encodeURIComponent(completionId)}&model=${encodeURIComponent(model)}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          if (res.status === 404 && count < MAX_POLL_COUNT) {
+            pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
+            return;
+          }
+          throw new Error(data.error || data.detail || '查询结果失败');
+        }
+
+        const videoUrl =
+          extractVideoUrl(data) ||
+          data.video_url ||
+          data.data?.video_url ||
+          data.output?.video_url ||
+          data.result?.video_url ||
+          null;
+
+        if (videoUrl) {
+          updateVideo(videoId, {
+            status: 'completed',
+            videoUrl,
+            thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url,
+            errorMsg: undefined,
+          });
+          addToast('success', '视频生成完成！');
+          onSettled();
+          return;
+        }
+
+        const status = String(data.status || data.data?.status || '').toLowerCase();
+        if (status === 'failed' || status === 'error') {
+          updateVideo(videoId, {
+            status: 'failed',
+            errorMsg: data.error?.message || data.error || data.detail || '生成失败',
+          });
+          addToast('error', '视频生成失败');
+          onSettled();
+          return;
+        }
+
+        pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
+      } catch (err: any) {
+        if (count < 5) {
+          pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS * 2);
+        } else {
+          updateVideo(videoId, { status: 'failed', errorMsg: err.message });
+          addToast('error', `查询结果失败: ${err.message}`);
+          onSettled();
+        }
+      }
+    };
+
+    pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
+  }, [updateVideo, addToast]);
+
   const executeGeneration = useCallback(async (videoId: string, model: Model, requestBody: GenerateRequestBody) => {
     const settle = () => {
       setModelBusy(model, false);
@@ -458,25 +578,50 @@ export default function App() {
         let streamText = '';
         let lastPayload: any = null;
         let latestTaskId: string | null = null;
+        let latestCompletionId: string | null = extractCompletionIdFromHeaders(res.headers);
         let latestStatus = '';
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
+          buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
 
           for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line.startsWith('data:')) continue;
+            processStreamLine(
+              rawLine,
+              (payload) => {
+                lastPayload = payload;
 
-            const dataText = line.slice(5).trim();
-            if (!dataText || dataText === '[DONE]') continue;
+                const deltaText = extractTextFromStreamPayload(payload);
+                if (deltaText) {
+                  streamText += deltaText;
+                  updateVideo(videoId, { errorMsg: streamText.slice(-160) });
+                }
 
-            try {
-              const payload = JSON.parse(dataText);
+                const taskId = extractTaskId(payload);
+                if (taskId) latestTaskId = taskId;
+                const completionId = extractCompletionId(payload);
+                if (completionId) latestCompletionId = completionId;
+                if (payload?.status) latestStatus = String(payload.status).toLowerCase();
+              },
+              (text) => {
+                streamText += text;
+                updateVideo(videoId, { errorMsg: streamText.slice(-160) });
+              },
+              (id) => {
+                latestCompletionId = id;
+              },
+            );
+          }
+
+          if (done) break;
+        }
+
+        if (buffer.trim()) {
+          processStreamLine(
+            buffer,
+            (payload) => {
               lastPayload = payload;
 
               const deltaText = extractTextFromStreamPayload(payload);
@@ -487,12 +632,18 @@ export default function App() {
 
               const taskId = extractTaskId(payload);
               if (taskId) latestTaskId = taskId;
+              const completionId = extractCompletionId(payload);
+              if (completionId) latestCompletionId = completionId;
               if (payload?.status) latestStatus = String(payload.status).toLowerCase();
-            } catch {
-              streamText += dataText;
+            },
+            (text) => {
+              streamText += text;
               updateVideo(videoId, { errorMsg: streamText.slice(-160) });
-            }
-          }
+            },
+            (id) => {
+              latestCompletionId = id;
+            },
+          );
         }
 
         const videoUrlFromPayload = lastPayload ? extractVideoUrl(lastPayload) : null;
@@ -518,6 +669,17 @@ export default function App() {
           });
           addToast('info', '任务已提交，正在生成中...');
           startPolling(videoId, latestTaskId, model, settle);
+          return;
+        }
+
+        if (latestCompletionId) {
+          updateVideo(videoId, {
+            completionId: latestCompletionId,
+            status: 'generating',
+            errorMsg: streamText.slice(-160) || '流式生成完成，正在查询最终结果...',
+          });
+          addToast('info', '流式生成结束，正在查询最终结果...');
+          startResultPolling(videoId, latestCompletionId, model, settle);
           return;
         }
 
