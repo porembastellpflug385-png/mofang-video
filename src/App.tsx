@@ -485,6 +485,7 @@ export default function App() {
 
   const startResultPolling = useCallback((videoId: string, completionId: string, model: Model, onSettled: () => void) => {
     let count = 0;
+    let notFoundCount = 0;
     const poll = async () => {
       count++;
       if (count > MAX_POLL_COUNT) {
@@ -500,6 +501,16 @@ export default function App() {
 
         if (!res.ok) {
           if (res.status === 404 && count < MAX_POLL_COUNT) {
+            notFoundCount++;
+            if (notFoundCount >= 3) {
+              updateVideo(videoId, {
+                status: 'failed',
+                errorMsg: '当前中转未提供该流式任务的结果查询接口（completion id 404）',
+              });
+              addToast('error', '中转不支持按 completion id 查询最终视频结果');
+              onSettled();
+              return;
+            }
             pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
             return;
           }

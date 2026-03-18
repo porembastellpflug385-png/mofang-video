@@ -91,7 +91,9 @@ export default async function handler(req, res) {
     }
 
     return res.status(lastError?.status || 404).json({
-      error: `查询结果失败 (${lastError?.status || 404})`,
+      error: (lastError?.status || 404) === 404
+        ? '上游未提供该 completion id 的结果查询接口'
+        : `查询结果失败 (${lastError?.status || 404})`,
       detail: String(lastError?.text || '').slice(0, 500),
     });
   } catch (err) {
