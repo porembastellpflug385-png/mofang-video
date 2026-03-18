@@ -10,16 +10,28 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const BASE_URL = process.env.OPENAI_BASE_URL || process.env.API_BASE_URL;
-  const API_KEY  = process.env.OPENAI_API_KEY  || process.env.API_KEY;
-
-  if (!BASE_URL || !API_KEY) {
-    return res.status(500).json({ error: '服务端配置错误' });
-  }
-
   const videoId = req.query.id;
+  const model = req.query.model || '';
   if (!videoId) {
     return res.status(400).json({ error: '缺少视频 ID' });
+  }
+
+  const isSora = model.startsWith('sora');
+  const BASE_URL =
+    (isSora
+      ? process.env.SORA_OPENAI_BASE_URL || process.env.SORA_API_BASE_URL
+      : undefined) ||
+    process.env.OPENAI_BASE_URL ||
+    process.env.API_BASE_URL;
+  const API_KEY =
+    (isSora
+      ? process.env.SORA_OPENAI_API_KEY || process.env.SORA_API_KEY
+      : undefined) ||
+    process.env.OPENAI_API_KEY ||
+    process.env.API_KEY;
+
+  if (!BASE_URL || !API_KEY) {
+    return res.status(500).json({ error: `服务端配置错误，请检查 ${isSora ? 'SORA_' : '默认'} 环境变量` });
   }
 
   try {

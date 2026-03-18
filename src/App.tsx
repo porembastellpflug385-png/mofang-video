@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Settings, Image as ImageIcon, Video, Download, Trash2, Plus, X, ChevronDown, Play, Loader2, ThumbsUp, ThumbsDown, Share2, MoreHorizontal, Sparkles, Clock, Settings2, AlertCircle, RefreshCw } from 'lucide-react';
 
 // ============ Types ============
@@ -31,7 +31,7 @@ interface VideoRecord {
   id: string;
   prompt: string;
   model: Model;
-  status: 'generating' | 'completed' | 'failed';
+  status: 'queued' | 'generating' | 'completed' | 'failed';
   thumbnailUrl?: string;
   videoUrl?: string;
   createdAt: number;
@@ -42,6 +42,15 @@ interface VideoRecord {
   taskId?: string;
   duration?: string;
   quality?: string;
+}
+
+interface GenerateRequestBody {
+  model: Model;
+  messages: Array<{
+    role: 'user';
+    content: any[];
+  }>;
+  stream: boolean;
 }
 
 // ============ Constants ============
@@ -213,19 +222,29 @@ export default function App() {
   const [lastFrame, setLastFrame] = useState<ImageFile | null>(null);
   const [omniImages, setOmniImages] = useState<ImageFile[]>([]);
   const [showParams, setShowParams] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [params, setParams] = useState<Record<string, string[]>>({
     classicCamera: [], basicCamera: [], speed: [], shotType: [], lighting: [], picture: [], atmosphere: []
   });
   const [videos, setVideos] = useState<VideoRecord[]>([]);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [busyModels, setBusyModels] = useState<Partial<Record<Model, boolean>>>({});
 
   const firstFrameRef = useRef<HTMLInputElement>(null);
   const lastFrameRef = useRef<HTMLInputElement>(null);
   const omniRef = useRef<HTMLInputElement>(null);
   const pollTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const pendingRequestsRef = useRef<Record<string, GenerateRequestBody>>({});
+  const busyModelsRef = useRef<Set<Model>>(new Set());
+  const videosRef = useRef<VideoRecord[]>([]);
+
+  useEffect(() => {
+    videosRef.current = videos;
+  }, [videos]);
 
   const currentModelConfig = MODEL_CONFIGS[selectedModel];
+  const currentModelBusy = Boolean(busyModels[selectedModel]);
+  const currentModelQueueCount = videos.filter(video => video.model === selectedModel && video.status === 'queued').length;
+  const activeModelCount = Object.keys(busyModels).length;
 
   const handleModelChange = (model: Model) => {
     setSelectedModel(model);
@@ -283,14 +302,50 @@ export default function App() {
     setVideos(prev => prev.map(v => v.id === id ? { ...v, ...updates } : v));
   }, []);
 
-  const startPolling = useCallback((videoId: string, taskId: string, model: string) => {
+  const setModelBusy = useCallback((model: Model, busy: boolean) => {
+    if (busy) busyModelsRef.current.add(model);
+    else busyModelsRef.current.delete(model);
+
+    setBusyModels(prev => {
+      const next = { ...prev };
+      if (busy) next[model] = true;
+      else delete next[model];
+      return next;
+    });
+  }, []);
+
+  const buildRequestBody = useCallback((): GenerateRequestBody => {
+    const fullPrompt = buildFullPrompt(prompt, params);
+    const content: any[] = [];
+
+    if (mode === 'first-last' && firstFrame) {
+      content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
+    }
+    if (mode === 'omni') {
+      for (const img of omniImages) {
+        content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
+      }
+    }
+
+    content.push({ type: 'text', text: fullPrompt });
+
+    return {
+      model: selectedModel,
+      messages: [{ role: 'user', content }],
+      stream: false,
+    };
+  }, [firstFrame, mode, omniImages, params, prompt, selectedModel]);
+
+  const runQueuedGenerationRef = useRef<((model: Model) => void) | null>(null);
+
+  const startPolling = useCallback((videoId: string, taskId: string, model: Model, onSettled: () => void) => {
     let count = 0;
     const poll = async () => {
       count++;
       if (count > MAX_POLL_COUNT) {
         updateVideo(videoId, { status: 'failed', errorMsg: '生成超时，请重试' });
-        setIsGenerating(false);
         addToast('error', '视频生成超时');
+        onSettled();
         return;
       }
       try {
@@ -319,17 +374,18 @@ export default function App() {
             videoUrl = `/api/content?id=${encodeURIComponent(data.id)}&model=${encodeURIComponent(model)}`;
           }
           updateVideo(videoId, { status: 'completed', videoUrl: videoUrl || undefined, thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url });
-          setIsGenerating(false);
           addToast('success', '视频生成完成！');
+          onSettled();
           return;
         }
         if (status === 'failed' || status === 'error') {
           const errMsg = data.error?.message || data.error || data.message || data.data?.error || '生成失败';
           updateVideo(videoId, { status: 'failed', errorMsg: typeof errMsg === 'string' ? errMsg : '生成失败' });
-          setIsGenerating(false);
           addToast('error', '视频生成失败');
+          onSettled();
           return;
         }
+        updateVideo(videoId, { status: status === 'queued' ? 'queued' : 'generating' });
         // queued / in_progress / processing → 继续轮询
         pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
       } catch (err: any) {
@@ -337,54 +393,25 @@ export default function App() {
           pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS * 2);
         } else {
           updateVideo(videoId, { status: 'failed', errorMsg: err.message });
-          setIsGenerating(false);
           addToast('error', `查询状态失败: ${err.message}`);
+          onSettled();
         }
       }
     };
     pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
   }, [updateVideo, addToast]);
 
-  const handleGenerate = async () => {
-    if (mode === 'first-last' && !firstFrame) { addToast('error', '请至少上传首帧图'); return; }
-    if (mode === 'omni' && omniImages.length === 0) { addToast('error', '请至少上传一张参考图'); return; }
-    if (!prompt.trim()) { addToast('error', '请输入提示词'); return; }
-
-    const videoId = Date.now().toString();
-    const newVideo: VideoRecord = {
-      id: videoId, prompt, model: selectedModel, status: 'generating', createdAt: Date.now(),
-      ratio: mode === 'first-last' ? ratio : undefined, mode, params: { ...params },
-      duration: duration !== '默认' ? duration : undefined,
-      quality: quality !== '默认' ? quality : undefined,
+  const executeGeneration = useCallback(async (videoId: string, model: Model, requestBody: GenerateRequestBody) => {
+    const settle = () => {
+      setModelBusy(model, false);
+      delete pendingRequestsRef.current[videoId];
+      runQueuedGenerationRef.current?.(model);
     };
-    setVideos(prev => [newVideo, ...prev]);
-    setIsGenerating(true);
+
+    setModelBusy(model, true);
+    updateVideo(videoId, { status: 'generating', errorMsg: undefined });
 
     try {
-      const fullPrompt = buildFullPrompt(prompt, params);
-
-      // 所有视频模型统一使用 chat/completions 格式
-      const content: any[] = [];
-
-      // 添加图片（首帧/参考图）
-      if (mode === 'first-last' && firstFrame) {
-        content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
-      }
-      if (mode === 'omni') {
-        for (const img of omniImages) {
-          content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
-        }
-      }
-
-      // 构建 prompt 文本
-      content.push({ type: 'text', text: fullPrompt });
-
-      const requestBody: any = {
-        model: selectedModel,
-        messages: [{ role: 'user', content }],
-        stream: false,
-      };
-
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -393,14 +420,10 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      // 解析返回 —— 视频 URL 在 choices[0].message.content 中
-      // 格式示例: "视频生成成功\n![image](缩略图URL)\n[点击下载视频](视频URL.mp4)"
       const msgContent = data.choices?.[0]?.message?.content;
 
       if (typeof msgContent === 'string') {
-        // 优先提取 .mp4 链接（从 markdown 格式中）
         const mp4Match = msgContent.match(/https?:\/\/[^\s"'<>)\]]+\.mp4[^\s"'<>)\]]*/);
-        // 也提取缩略图
         const thumbMatch = msgContent.match(/!\[.*?\]\((https?:\/\/[^\s"'<>)]+)\)/);
 
         if (mp4Match) {
@@ -409,27 +432,25 @@ export default function App() {
             videoUrl: mp4Match[0],
             thumbnailUrl: thumbMatch ? thumbMatch[1] : undefined,
           });
-          setIsGenerating(false);
           addToast('success', '视频生成完成！');
+          settle();
           return;
         }
 
-        // 如果没有 .mp4，尝试提取任何 URL
         const anyUrl = msgContent.match(/https?:\/\/[^\s"'<>)\]]+/);
         if (anyUrl) {
           updateVideo(videoId, { status: 'completed', videoUrl: anyUrl[0] });
-          setIsGenerating(false);
           addToast('success', '视频生成完成！');
+          settle();
           return;
         }
       }
 
-      // 如果 content 里没有 URL，检查是否是异步任务
       const taskId = data.id || data.task_id;
       if (taskId && data.status) {
-        updateVideo(videoId, { taskId });
-        startPolling(videoId, taskId, selectedModel);
+        updateVideo(videoId, { taskId, status: String(data.status).toLowerCase() === 'queued' ? 'queued' : 'generating' });
         addToast('info', '任务已提交，正在生成中...');
+        startPolling(videoId, taskId, model, settle);
         return;
       }
 
@@ -437,9 +458,46 @@ export default function App() {
     } catch (err: any) {
       console.error('Generate error:', err);
       updateVideo(videoId, { status: 'failed', errorMsg: err.message });
-      setIsGenerating(false);
       addToast('error', `生成失败: ${err.message}`);
+      settle();
     }
+  }, [addToast, setModelBusy, startPolling, updateVideo]);
+
+  const runQueuedGeneration = useCallback((model: Model) => {
+    if (busyModelsRef.current.has(model)) return;
+
+    const nextVideo = videosRef.current.find(video => video.model === model && video.status === 'queued' && pendingRequestsRef.current[video.id]);
+    if (!nextVideo) return;
+
+    const requestBody = pendingRequestsRef.current[nextVideo.id];
+    void executeGeneration(nextVideo.id, model, requestBody);
+  }, [executeGeneration]);
+
+  runQueuedGenerationRef.current = runQueuedGeneration;
+
+  const handleGenerate = async () => {
+    if (mode === 'first-last' && !firstFrame) { addToast('error', '请至少上传首帧图'); return; }
+    if (mode === 'omni' && omniImages.length === 0) { addToast('error', '请至少上传一张参考图'); return; }
+    if (!prompt.trim()) { addToast('error', '请输入提示词'); return; }
+
+    const videoId = Date.now().toString();
+    const requestBody = buildRequestBody();
+    const shouldQueue = busyModelsRef.current.has(selectedModel);
+    const newVideo: VideoRecord = {
+      id: videoId, prompt, model: selectedModel, status: shouldQueue ? 'queued' : 'generating', createdAt: Date.now(),
+      ratio: mode === 'first-last' ? ratio : undefined, mode, params: { ...params },
+      duration: duration !== '默认' ? duration : undefined,
+      quality: quality !== '默认' ? quality : undefined,
+    };
+    pendingRequestsRef.current[videoId] = requestBody;
+    setVideos(prev => [newVideo, ...prev]);
+
+    if (shouldQueue) {
+      addToast('info', `${MODEL_CONFIGS[selectedModel].label} 当前忙碌，已加入队列`);
+      return;
+    }
+
+    void executeGeneration(videoId, selectedModel, requestBody);
   };
 
   const handleRetry = (video: VideoRecord) => {
@@ -456,6 +514,7 @@ export default function App() {
   const handleDelete = (id: string) => {
     if (confirm('确定要删除这条记录吗？')) {
       if (pollTimerRef.current[id]) { clearTimeout(pollTimerRef.current[id]); delete pollTimerRef.current[id]; }
+      delete pendingRequestsRef.current[id];
       setVideos(prev => prev.filter(v => v.id !== id));
     }
   };
@@ -659,15 +718,19 @@ export default function App() {
 
         {/* Generate Button */}
         <div className="p-5 border-t border-white/10 bg-black/20 backdrop-blur-xl">
+          <div className="mb-3 flex items-center justify-between text-[11px] text-white/45">
+            <span>当前并发模型：{activeModelCount}</span>
+            <span>{currentModelBusy ? `当前模型排队 ${currentModelQueueCount} 条` : '当前模型可立即提交'}</span>
+          </div>
           <button onClick={handleGenerate}
-            disabled={isGenerating || (mode === 'first-last' && !firstFrame) || !prompt}
+            disabled={(mode === 'first-last' && !firstFrame) || !prompt}
             className="w-full relative overflow-hidden group bg-gradient-to-r from-cyan-600 to-blue-600 text-white font-medium py-3.5 rounded-2xl flex items-center justify-center space-x-2 hover:from-cyan-500 hover:to-blue-500 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(8,145,178,0.4)]">
             <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
             <div className="relative flex items-center justify-center space-x-2">
-              {isGenerating ? (
+              {currentModelBusy ? (
                 <>
                   <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span className="text-[15px]">生成中...</span>
+                  <span className="text-[15px]">加入当前模型队列</span>
                 </>
               ) : (
                 <>
@@ -729,7 +792,12 @@ export default function App() {
                   
                   {/* Player */}
                   <div className="relative aspect-video bg-black/60 flex items-center justify-center overflow-hidden flex-1">
-                    {video.status === 'generating' ? (
+                    {video.status === 'queued' ? (
+                      <div className="flex flex-col items-center text-amber-300/85">
+                        <div className="w-10 h-10 border-2 border-amber-500/30 border-t-amber-300 rounded-full animate-spin mb-4 shadow-[0_0_20px_rgba(251,191,36,0.2)]" />
+                        <span className="text-sm font-medium tracking-wider animate-pulse">模型排队中，等待自动提交...</span>
+                      </div>
+                    ) : video.status === 'generating' ? (
                       <div className="flex flex-col items-center text-cyan-400/80">
                         <div className="w-10 h-10 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mb-4 shadow-[0_0_20px_rgba(34,211,238,0.2)]" />
                         <span className="text-sm font-medium tracking-wider animate-pulse">AI 正在努力生成中...</span>
@@ -770,6 +838,12 @@ export default function App() {
                   {video.status === 'failed' && (
                     <div className="p-4 flex items-center justify-between bg-black/20 border-t border-white/5">
                       <div className="text-xs font-medium text-white/40">{new Date(video.createdAt).toLocaleString()}</div>
+                      <button className="p-2 text-white/40 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-all duration-300" onClick={() => handleDelete(video.id)} title="删除"><Trash2 className="w-4 h-4"/></button>
+                    </div>
+                  )}
+                  {video.status === 'queued' && (
+                    <div className="p-4 flex items-center justify-between bg-black/20 border-t border-white/5">
+                      <div className="text-xs font-medium text-amber-300/70">等待同模型空闲后自动开始</div>
                       <button className="p-2 text-white/40 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-all duration-300" onClick={() => handleDelete(video.id)} title="删除"><Trash2 className="w-4 h-4"/></button>
                     </div>
                   )}

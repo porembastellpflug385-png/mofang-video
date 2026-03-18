@@ -74,21 +74,44 @@ async function sendJsonRequest(apiUrl, apiKey, body, signal) {
   return { response, text };
 }
 
+function getApiConfigForModel(model = '') {
+  const isSora = model.startsWith('sora');
+
+  if (isSora) {
+    return {
+      baseUrl:
+        process.env.SORA_OPENAI_BASE_URL ||
+        process.env.SORA_API_BASE_URL ||
+        process.env.OPENAI_BASE_URL ||
+        process.env.API_BASE_URL,
+      apiKey:
+        process.env.SORA_OPENAI_API_KEY ||
+        process.env.SORA_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        process.env.API_KEY,
+    };
+  }
+
+  return {
+    baseUrl: process.env.OPENAI_BASE_URL || process.env.API_BASE_URL,
+    apiKey: process.env.OPENAI_API_KEY || process.env.API_KEY,
+  };
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const BASE_URL = process.env.OPENAI_BASE_URL || process.env.API_BASE_URL;
-  const API_KEY  = process.env.OPENAI_API_KEY  || process.env.API_KEY;
-
-  if (!BASE_URL || !API_KEY) {
-    return res.status(500).json({ error: '服务端配置错误，请检查环境变量' });
-  }
-
   try {
     const body = req.body;
     const model = body.model || '';
+    const { baseUrl: BASE_URL, apiKey: API_KEY } = getApiConfigForModel(model);
+
+    if (!BASE_URL || !API_KEY) {
+      return res.status(500).json({ error: `服务端配置错误，请检查 ${model.startsWith('sora') ? 'SORA_' : '默认'} 环境变量` });
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 300000);
 
