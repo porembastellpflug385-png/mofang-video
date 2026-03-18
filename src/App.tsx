@@ -46,11 +46,17 @@ interface VideoRecord {
 
 interface GenerateRequestBody {
   model: Model;
-  messages: Array<{
+  messages?: Array<{
     role: 'user';
     content: any[];
   }>;
-  stream: boolean;
+  stream?: boolean;
+  prompt?: string;
+  image?: string;
+  aspect_ratio?: string;
+  size?: string;
+  seconds?: number;
+  duration?: number;
 }
 
 // ============ Constants ============
@@ -316,6 +322,31 @@ export default function App() {
 
   const buildRequestBody = useCallback((): GenerateRequestBody => {
     const fullPrompt = buildFullPrompt(prompt, params);
+    const parsedDuration = duration !== '默认' ? parseInt(duration, 10) : undefined;
+
+    if (selectedModel.startsWith('veo_') || selectedModel.startsWith('sora')) {
+      const body: GenerateRequestBody = {
+        model: selectedModel,
+        prompt: fullPrompt,
+      };
+
+      if (firstFrame) {
+        body.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+      }
+      if (mode === 'first-last' && ratio !== '智能模式') {
+        body.aspect_ratio = ratio;
+      }
+      if (selectedModel.startsWith('sora') && mode === 'first-last' && ratio !== '智能模式') {
+        body.size = ratioToSize(ratio);
+      }
+      if (parsedDuration) {
+        body.seconds = parsedDuration;
+        body.duration = parsedDuration;
+      }
+
+      return body;
+    }
+
     const content: any[] = [];
 
     if (mode === 'first-last' && firstFrame) {
@@ -334,7 +365,7 @@ export default function App() {
       messages: [{ role: 'user', content }],
       stream: false,
     };
-  }, [firstFrame, mode, omniImages, params, prompt, selectedModel]);
+  }, [duration, firstFrame, mode, omniImages, params, prompt, ratio, selectedModel]);
 
   const runQueuedGenerationRef = useRef<((model: Model) => void) | null>(null);
 
@@ -418,7 +449,15 @@ export default function App() {
         body: JSON.stringify(requestBody),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
+      if (!res.ok) {
+        const detail =
+          data.detail ||
+          data.raw ||
+          data.error?.message ||
+          data.error ||
+          `请求失败 (${res.status})`;
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail).slice(0, 300));
+      }
 
       const msgContent = data.choices?.[0]?.message?.content;
 
