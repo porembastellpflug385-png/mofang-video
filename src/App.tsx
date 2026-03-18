@@ -365,22 +365,17 @@ export default function App() {
       let requestBody: any;
 
       if (selectedModel.startsWith('sora')) {
-        const content: any[] = [];
-        if (firstFrame) {
-          content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
-        }
-        if (mode === 'omni') {
-          for (const img of omniImages) {
-            content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
-          }
-        }
-        content.push({ type: 'text', text: fullPrompt });
-
         requestBody = {
           model: selectedModel,
-          messages: [{ role: 'user', content }],
-          stream: false,
+          prompt: fullPrompt,
         };
+        if (firstFrame) {
+          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+          requestBody.size = ratioToSize(ratio);
+          requestBody.aspect_ratio = ratio;
+        }
       } else if (selectedModel.startsWith('veo_')) {
         requestBody = {
           model: selectedModel,
@@ -411,9 +406,6 @@ export default function App() {
         const sec = parseInt(duration, 10);
         requestBody.seconds = sec;
         requestBody.duration = sec;
-      }
-      if (mode === 'first-last' && ratio && ratio !== '智能模式' && selectedModel.startsWith('sora')) {
-        requestBody.size = ratioToSize(ratio);
       }
 
       const res = await fetch('/api/generate', {

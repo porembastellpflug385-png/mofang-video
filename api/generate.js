@@ -25,7 +25,7 @@ export default async function handler(req, res) {
 
     let path = '/chat/completions';
     if (model.startsWith('sora')) {
-      path = Array.isArray(body.messages) ? '/chat/completions' : '/videos';
+      path = '/videos';
     } else if (model.startsWith('veo_')) {
       path = '/videos';
     } else if (model.startsWith('veo')) {
