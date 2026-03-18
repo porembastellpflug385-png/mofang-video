@@ -1,30 +1,30 @@
-/**
- * GET /api/content?id=xxx
- * 
- * 获取视频内容下载链接
- * GET {BASE}/videos/{id}/content
- */
+export const config = { runtime: 'edge' };
 
-export default async function handler(req, res) {
+export default async function handler(req) {
   if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+      status: 405, headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   const BASE_URL = process.env.OPENAI_BASE_URL || process.env.API_BASE_URL;
   const API_KEY  = process.env.OPENAI_API_KEY  || process.env.API_KEY;
-
   if (!BASE_URL || !API_KEY) {
-    return res.status(500).json({ error: '服务端配置错误' });
+    return new Response(JSON.stringify({ error: '服务端配置错误' }), {
+      status: 500, headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  const videoId = req.query.id;
+  const url = new URL(req.url);
+  const videoId = url.searchParams.get('id');
   if (!videoId) {
-    return res.status(400).json({ error: '缺少视频 ID' });
+    return new Response(JSON.stringify({ error: '缺少视频 ID' }), {
+      status: 400, headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   try {
-    const apiUrl = `${BASE_URL}/videos/${videoId}/content`;
-    const apiResponse = await fetch(apiUrl, {
+    const apiResponse = await fetch(`${BASE_URL}/videos/${videoId}/content`, {
       method: 'GET',
       headers: { 'Authorization': API_KEY },
       redirect: 'follow',
@@ -32,29 +32,25 @@ export default async function handler(req, res) {
 
     if (!apiResponse.ok) {
       const errorText = await apiResponse.text();
-      return res.status(apiResponse.status).json({
-        error: `获取视频内容失败 (${apiResponse.status})`,
+      return new Response(JSON.stringify({
+        error: `获取失败 (${apiResponse.status})`,
         detail: errorText.slice(0, 500),
+      }), {
+        status: apiResponse.status,
+        headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    const contentType = apiResponse.headers.get('content-type') || '';
-
-    if (contentType.includes('video') || contentType.includes('octet-stream')) {
-      res.setHeader('Content-Type', contentType);
-      const buffer = Buffer.from(await apiResponse.arrayBuffer());
-      return res.status(200).send(buffer);
-    }
-
-    try {
-      const data = await apiResponse.json();
-      if (data.url) return res.redirect(302, data.url);
-      return res.status(200).json(data);
-    } catch {
-      return res.status(200).send(await apiResponse.text());
-    }
+    // 透传响应
+    return new Response(apiResponse.body, {
+      status: 200,
+      headers: {
+        'Content-Type': apiResponse.headers.get('content-type') || 'application/octet-stream',
+      },
+    });
   } catch (err) {
-    console.error('[content] Error:', err);
-    return res.status(500).json({ error: '获取视频内容失败', detail: err.message });
+    return new Response(JSON.stringify({ error: '获取失败', detail: err.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json' },
+    });
   }
 }
