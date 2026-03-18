@@ -12,8 +12,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const API_BASE_URL = process.env.API_BASE_URL;
-  const API_KEY = process.env.API_KEY;
+ const API_BASE_URL = process.env.OPENAI_BASE_URL;  // 匹配你设置的环境变量
+const API_KEY = process.env.OPENAI_API_KEY;        // 需要设置这个
 
   if (!API_BASE_URL || !API_KEY) {
     return res.status(500).json({ error: '服务端配置错误' });
