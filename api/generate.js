@@ -7,6 +7,10 @@
  * 重要：Authorization 不带 Bearer 前缀
  */
 
+export const config = {
+  maxDuration: 300,
+};
+
 function getTextAndImagesFromMessages(messages = []) {
   const textParts = [];
   const imageUrls = [];
