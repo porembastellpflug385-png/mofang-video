@@ -1,9 +1,8 @@
-// @ts-nocheck
 /**
  * GET /api/content?id=xxx
  * 
- * 获取 Sora 视频内容下载链接
- * 代理 GET {BASE}/videos/{id}/content
+ * 获取视频内容下载链接
+ * GET {BASE}/videos/{id}/content
  */
 
 export default async function handler(req, res) {
@@ -27,7 +26,7 @@ export default async function handler(req, res) {
     const apiUrl = `${BASE_URL}/videos/${videoId}/content`;
     const apiResponse = await fetch(apiUrl, {
       method: 'GET',
-      headers: { 'Authorization': `Bearer ${API_KEY}` },
+      headers: { 'Authorization': API_KEY },
       redirect: 'follow',
     });
 
@@ -47,7 +46,6 @@ export default async function handler(req, res) {
       return res.status(200).send(buffer);
     }
 
-    // JSON with download URL
     try {
       const data = await apiResponse.json();
       if (data.url) return res.redirect(302, data.url);

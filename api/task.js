@@ -1,10 +1,14 @@
-// @ts-nocheck
 /**
  * GET /api/task?id=xxx&model=sora-2
  * 
  * 查询视频生成任务状态
- *   统一:  GET {BASE}/videos/{id}
- *   回退:  GET {BASE}/videos/generations/{id}
+ * 
+ * 端点：
+ *   - sora / veo_ 系列: GET {BASE}/videos/{id}
+ *   - 视频统一格式:     GET {BASE}/videos/generations/{id}
+ *   - 回退自动尝试两个
+ * 
+ * 重要：此平台 Authorization 不带 Bearer 前缀！
  */
 
 export default async function handler(req, res) {
@@ -26,36 +30,39 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: '缺少任务 ID' });
   }
 
+  const headers = {
+    'Authorization': API_KEY,
+    'Content-Type': 'application/json',
+  };
+
+  // 根据模型选择轮询端点
+  let primaryPath, fallbackPath;
+  if (model.startsWith('sora') || model.startsWith('veo_')) {
+    // openAI视频格式
+    primaryPath = `/videos/${taskId}`;
+    fallbackPath = `/videos/generations/${taskId}`;
+  } else {
+    // 视频统一格式
+    primaryPath = `/videos/generations/${taskId}`;
+    fallbackPath = `/videos/${taskId}`;
+  }
+
   try {
-    // 先尝试通用路径
-    let apiUrl = `${BASE_URL}/videos/${taskId}`;
+    let apiUrl = `${BASE_URL}${primaryPath}`;
     console.log(`[task] polling → ${apiUrl}`);
 
-    let apiResponse = await fetch(apiUrl, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
+    let apiResponse = await fetch(apiUrl, { method: 'GET', headers });
 
-    // 如果 404，尝试 /videos/generations/{id}
-    if (apiResponse.status === 404) {
-      const fallbackUrl = `${BASE_URL}/videos/generations/${taskId}`;
-      console.log(`[task] fallback → ${fallbackUrl}`);
-      apiResponse = await fetch(fallbackUrl, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      });
+    // 如果 404，尝试备用路径
+    if (apiResponse.status === 404 && fallbackPath) {
+      apiUrl = `${BASE_URL}${fallbackPath}`;
+      console.log(`[task] fallback → ${apiUrl}`);
+      apiResponse = await fetch(apiUrl, { method: 'GET', headers });
     }
 
     const responseText = await apiResponse.text();
 
     if (!apiResponse.ok) {
-      console.error(`[task] Error ${apiResponse.status}:`, responseText.slice(0, 500));
       return res.status(apiResponse.status).json({
         error: `查询失败 (${apiResponse.status})`,
         detail: responseText.slice(0, 500),
@@ -63,8 +70,7 @@ export default async function handler(req, res) {
     }
 
     try {
-      const data = JSON.parse(responseText);
-      return res.status(200).json(data);
+      return res.status(200).json(JSON.parse(responseText));
     } catch {
       return res.status(200).json({ raw: responseText });
     }

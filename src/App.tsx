@@ -361,39 +361,60 @@ export default function App() {
     setIsGenerating(true);
 
     try {
-      // 使用平台"统一视频格式" → POST /videos/generations
-      // 请求体: { model, prompt, image?, aspect_ratio?, seconds?, size? }
       const fullPrompt = buildFullPrompt(prompt, params);
+      let requestBody: any;
 
-      const requestBody: any = {
-        model: selectedModel,
-        prompt: fullPrompt,
-      };
-
-      // 图片参考（首帧）
-      if (firstFrame) {
-        requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
-      }
-
-      // 比例
-      if (mode === 'first-last' && ratio && ratio !== '智能模式') {
-        requestBody.aspect_ratio = ratio;
-        // Sora 需要 size 格式
-        if (selectedModel.startsWith('sora')) {
-          requestBody.size = ratioToSize(ratio);
+      if (selectedModel.startsWith('sora')) {
+        // ===== Sora 系列: 支持 openai chat/completions 格式 =====
+        // 通过 messages 发送，后端路由到 /chat/completions
+        const content: any[] = [];
+        if (firstFrame) {
+          content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
         }
+        content.push({ type: 'text', text: fullPrompt });
+
+        requestBody = {
+          model: selectedModel,
+          messages: [{ role: 'user', content }],
+          stream: false,
+        };
+      } else if (selectedModel.startsWith('veo_')) {
+        // ===== veo_3_1 系列 (下划线): openAI视频格式 → /videos =====
+        requestBody = {
+          model: selectedModel,
+          prompt: fullPrompt,
+        };
+        if (firstFrame) {
+          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
+          requestBody.aspect_ratio = ratio;
+        }
+      } else if (selectedModel.startsWith('grok-video')) {
+        // ===== Grok Video 系列: grok视频格式 → /videos/generations =====
+        requestBody = {
+          model: selectedModel,
+          prompt: fullPrompt,
+        };
+        if (firstFrame) {
+          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+        }
+      } else {
+        // ===== 其他模型: 视频统一格式 → /videos/generations =====
+        requestBody = {
+          model: selectedModel,
+          prompt: fullPrompt,
+        };
       }
 
-      // 时长 (Sora 用 seconds 字段)
+      // 通用参数
       if (duration !== '默认') {
         const sec = parseInt(duration);
         requestBody.seconds = sec;
         requestBody.duration = sec;
       }
-
-      // 清晰度
-      if (quality !== '默认') {
-        requestBody.quality = quality;
+      if (mode === 'first-last' && ratio && ratio !== '智能模式' && selectedModel.startsWith('sora')) {
+        requestBody.size = ratioToSize(ratio);
       }
 
       const res = await fetch('/api/generate', {
@@ -404,8 +425,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      // 统一视频格式返回: { id, status, model, ... }
-      // 异步任务需要轮询
+      // 解析返回
       const taskId = data.id || data.task_id || data.data?.task_id || data.data?.id;
       const videoUrl = data.video_url 
         || data.data?.video_url
@@ -421,7 +441,7 @@ export default function App() {
         startPolling(videoId, taskId, selectedModel);
         addToast('info', '任务已提交，正在生成中...');
       } else {
-        // 也检查 choices 格式（兼容 chat 格式返回）
+        // chat 格式可能在 choices 里返回视频 URL
         const msgContent = data.choices?.[0]?.message?.content;
         if (typeof msgContent === 'string' && msgContent.includes('http')) {
           const urlMatch = msgContent.match(/https?:\/\/[^\s"'<>]+/);
