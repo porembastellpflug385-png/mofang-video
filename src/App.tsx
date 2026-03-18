@@ -178,7 +178,16 @@ function extractTextFromStreamPayload(payload: any): string {
 }
 
 function extractTaskId(payload: any): string | null {
-  return payload?.task_id || payload?.id || payload?.data?.task_id || payload?.data?.id || null;
+  const candidate =
+    payload?.task_id ||
+    payload?.data?.task_id ||
+    payload?.task?.id ||
+    null;
+
+  if (typeof candidate !== 'string') return null;
+  const normalized = candidate.toLowerCase();
+  if (normalized.startsWith('chatcmpl') || normalized.startsWith('chatcmp')) return null;
+  return candidate;
 }
 
 /** 将比例字符串转为 Sora 的 size 格式 (WxH) */
