@@ -1,15 +1,10 @@
 /**
  * POST /api/generate
  * 
- * 生产队API视频生成代理
+ * 生产队API - 所有视频模型统一走 /chat/completions
+ * 返回格式: choices[0].message.content 包含视频URL(markdown格式)
  * 
- * 端点路由（根据模型的 supported_endpoint_types）：
- *   - sora-2 系列 (openai):       POST {BASE}/chat/completions
- *   - veo_3_1 系列 (openAI视频格式): POST {BASE}/videos
- *   - grok-video 系列 (grok视频):    需要专用格式
- *   - 其他视频统一格式:              POST {BASE}/videos/generations
- * 
- * 重要：此平台 Authorization 不带 Bearer 前缀！
+ * 重要：Authorization 不带 Bearer 前缀
  */
 
 export default async function handler(req, res) {
@@ -26,40 +21,18 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body;
-    const model = body.model || '';
+    const apiUrl = `${BASE_URL}/chat/completions`;
 
-    // 根据模型选择端点
-    let path;
-    if (model.startsWith('sora')) {
-      // sora-2 支持 openai 格式 (chat/completions) 和 openAI官方视频格式 (/videos)
-      // 如果请求体有 messages → chat/completions, 否则 → /videos
-      path = Array.isArray(body.messages) ? '/chat/completions' : '/videos';
-    } else if (model.startsWith('veo_')) {
-      // veo_3_1-4K 等下划线格式的 → openAI视频格式 → /videos
-      path = '/videos';
-    } else if (model.startsWith('veo')) {
-      // veo3.1 等点号格式的 → 视频统一格式 → /videos/generations
-      path = '/videos/generations';
-    } else if (model.startsWith('grok-video')) {
-      // grok视频 → 专用格式，也走 /videos/generations 试试
-      path = '/videos/generations';
-    } else {
-      // 回退到 chat/completions
-      path = '/chat/completions';
-    }
-
-    const apiUrl = `${BASE_URL}${path}`;
-    console.log(`[generate] model=${model} → ${apiUrl}`);
+    console.log(`[generate] model=${body.model} → ${apiUrl}`);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 180000);
+    const timeout = setTimeout(() => controller.abort(), 300000); // 5分钟超时（视频生成耗时较长）
 
     const apiResponse = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // 重要：此平台不用 Bearer 前缀
-        'Authorization': API_KEY,
+        'Authorization': API_KEY,  // 不带 Bearer
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -83,7 +56,7 @@ export default async function handler(req, res) {
     }
   } catch (err) {
     if (err.name === 'AbortError') {
-      return res.status(504).json({ error: '请求超时，请稍后重试' });
+      return res.status(504).json({ error: '视频生成超时，请稍后重试' });
     }
     console.error('[generate] Error:', err);
     return res.status(500).json({ error: '服务器内部错误', detail: err.message });

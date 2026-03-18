@@ -362,60 +362,28 @@ export default function App() {
 
     try {
       const fullPrompt = buildFullPrompt(prompt, params);
-      let requestBody: any;
 
-      if (selectedModel.startsWith('sora')) {
-        // ===== Sora 系列: 支持 openai chat/completions 格式 =====
-        // 通过 messages 发送，后端路由到 /chat/completions
-        const content: any[] = [];
-        if (firstFrame) {
-          content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
-        }
-        content.push({ type: 'text', text: fullPrompt });
+      // 所有视频模型统一使用 chat/completions 格式
+      const content: any[] = [];
 
-        requestBody = {
-          model: selectedModel,
-          messages: [{ role: 'user', content }],
-          stream: false,
-        };
-      } else if (selectedModel.startsWith('veo_')) {
-        // ===== veo_3_1 系列 (下划线): openAI视频格式 → /videos =====
-        requestBody = {
-          model: selectedModel,
-          prompt: fullPrompt,
-        };
-        if (firstFrame) {
-          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
+      // 添加图片（首帧/参考图）
+      if (mode === 'first-last' && firstFrame) {
+        content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
+      }
+      if (mode === 'omni') {
+        for (const img of omniImages) {
+          content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
         }
-        if (mode === 'first-last' && ratio && ratio !== '智能模式') {
-          requestBody.aspect_ratio = ratio;
-        }
-      } else if (selectedModel.startsWith('grok-video')) {
-        // ===== Grok Video 系列: grok视频格式 → /videos/generations =====
-        requestBody = {
-          model: selectedModel,
-          prompt: fullPrompt,
-        };
-        if (firstFrame) {
-          requestBody.image = `data:${firstFrame.mimeType};base64,${firstFrame.base64}`;
-        }
-      } else {
-        // ===== 其他模型: 视频统一格式 → /videos/generations =====
-        requestBody = {
-          model: selectedModel,
-          prompt: fullPrompt,
-        };
       }
 
-      // 通用参数
-      if (duration !== '默认') {
-        const sec = parseInt(duration);
-        requestBody.seconds = sec;
-        requestBody.duration = sec;
-      }
-      if (mode === 'first-last' && ratio && ratio !== '智能模式' && selectedModel.startsWith('sora')) {
-        requestBody.size = ratioToSize(ratio);
-      }
+      // 构建 prompt 文本
+      content.push({ type: 'text', text: fullPrompt });
+
+      const requestBody: any = {
+        model: selectedModel,
+        messages: [{ role: 'user', content }],
+        stream: false,
+      };
 
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -425,37 +393,47 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `请求失败 (${res.status})`);
 
-      // 解析返回
-      const taskId = data.id || data.task_id || data.data?.task_id || data.data?.id;
-      const videoUrl = data.video_url 
-        || data.data?.video_url
-        || data.data?.videos?.[0]?.url
-        || extractVideoUrl(data);
+      // 解析返回 —— 视频 URL 在 choices[0].message.content 中
+      // 格式示例: "视频生成成功\n![image](缩略图URL)\n[点击下载视频](视频URL.mp4)"
+      const msgContent = data.choices?.[0]?.message?.content;
 
-      if (videoUrl) {
-        updateVideo(videoId, { status: 'completed', videoUrl });
-        setIsGenerating(false);
-        addToast('success', '视频生成完成！');
-      } else if (taskId) {
+      if (typeof msgContent === 'string') {
+        // 优先提取 .mp4 链接（从 markdown 格式中）
+        const mp4Match = msgContent.match(/https?:\/\/[^\s"'<>)\]]+\.mp4[^\s"'<>)\]]*/);
+        // 也提取缩略图
+        const thumbMatch = msgContent.match(/!\[.*?\]\((https?:\/\/[^\s"'<>)]+)\)/);
+
+        if (mp4Match) {
+          updateVideo(videoId, {
+            status: 'completed',
+            videoUrl: mp4Match[0],
+            thumbnailUrl: thumbMatch ? thumbMatch[1] : undefined,
+          });
+          setIsGenerating(false);
+          addToast('success', '视频生成完成！');
+          return;
+        }
+
+        // 如果没有 .mp4，尝试提取任何 URL
+        const anyUrl = msgContent.match(/https?:\/\/[^\s"'<>)\]]+/);
+        if (anyUrl) {
+          updateVideo(videoId, { status: 'completed', videoUrl: anyUrl[0] });
+          setIsGenerating(false);
+          addToast('success', '视频生成完成！');
+          return;
+        }
+      }
+
+      // 如果 content 里没有 URL，检查是否是异步任务
+      const taskId = data.id || data.task_id;
+      if (taskId && data.status) {
         updateVideo(videoId, { taskId });
         startPolling(videoId, taskId, selectedModel);
         addToast('info', '任务已提交，正在生成中...');
-      } else {
-        // chat 格式可能在 choices 里返回视频 URL
-        const msgContent = data.choices?.[0]?.message?.content;
-        if (typeof msgContent === 'string' && msgContent.includes('http')) {
-          const urlMatch = msgContent.match(/https?:\/\/[^\s"'<>]+/);
-          if (urlMatch) {
-            updateVideo(videoId, { status: 'completed', videoUrl: urlMatch[0] });
-            setIsGenerating(false);
-            addToast('success', '视频生成完成！');
-          } else {
-            throw new Error('无法从返回内容中提取视频链接');
-          }
-        } else {
-          throw new Error('API 返回格式异常。返回：' + JSON.stringify(data).slice(0, 300));
-        }
+        return;
       }
+
+      throw new Error('未获取到视频链接。返回：' + JSON.stringify(data).slice(0, 300));
     } catch (err: any) {
       console.error('Generate error:', err);
       updateVideo(videoId, { status: 'failed', errorMsg: err.message });
