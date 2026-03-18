@@ -1,8 +1,8 @@
 /**
  * POST /api/generate
  *
- * 默认保持原有 chat/completions 行为，避免影响已经可用的 grok。
- * 对 sora / veo 在 chat 端点失败时，自动回退到视频任务端点。
+ * 恢复到原始的 /chat/completions 路径，
+ * 并在 stream=true 时将上游 SSE 原样转发给前端。
  *
  * 重要：Authorization 不带 Bearer 前缀
  */
@@ -10,91 +10,6 @@
 export const config = {
   maxDuration: 300,
 };
-
-function getTextAndImagesFromMessages(messages = []) {
-  const textParts = [];
-  const imageUrls = [];
-
-  for (const message of messages) {
-    const content = message?.content;
-    if (typeof content === 'string') {
-      textParts.push(content);
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
-
-    for (const block of content) {
-      if (block?.type === 'text' && typeof block.text === 'string') {
-        textParts.push(block.text);
-      }
-      if (block?.type === 'image_url' && typeof block.image_url?.url === 'string') {
-        imageUrls.push(block.image_url.url);
-      }
-    }
-  }
-
-  return {
-    prompt: textParts.join('\n').trim(),
-    imageUrls,
-  };
-}
-
-function extractAspectRatio(prompt = '') {
-  const match = prompt.match(/(16:9|4:3|1:1|3:4|9:16)/);
-  return match ? match[1] : undefined;
-}
-
-function buildVideoFallbackBody(body) {
-  const { prompt, imageUrls } = getTextAndImagesFromMessages(body.messages);
-  const nextBody = {
-    model: body.model,
-    prompt,
-  };
-
-  if (imageUrls[0]) {
-    nextBody.image = imageUrls[0];
-  }
-
-  const aspectRatio = extractAspectRatio(prompt);
-  if (aspectRatio) {
-    nextBody.aspect_ratio = aspectRatio;
-  }
-
-  return nextBody;
-}
-
-function buildRequestForModel(body) {
-  const model = body.model || '';
-
-  if (Array.isArray(body.messages) && (model.startsWith('sora') || model.startsWith('veo_'))) {
-    return {
-      path: '/videos',
-      body: buildVideoFallbackBody(body),
-      timeoutMs: 25000,
-    };
-  }
-
-  return {
-    path: '/chat/completions',
-    body,
-    timeoutMs: 300000,
-  };
-}
-
-async function sendJsonRequest(apiUrl, apiKey, body, signal) {
-  const response = await fetch(apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': apiKey,
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  const text = await response.text();
-  return { response, text };
-}
 
 function getApiConfigForModel(model = '') {
   const isSora = model.startsWith('sora');
@@ -120,6 +35,26 @@ function getApiConfigForModel(model = '') {
   };
 }
 
+async function pipeStream(upstreamResponse, res) {
+  const contentType = upstreamResponse.headers.get('content-type') || 'text/event-stream; charset=utf-8';
+
+  res.statusCode = 200;
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
+
+  for await (const chunk of upstreamResponse.body) {
+    res.write(chunk);
+  }
+
+  res.end();
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -134,29 +69,48 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: `服务端配置错误，请检查 ${model.startsWith('sora') ? 'SORA_' : '默认'} 环境变量` });
     }
 
-    const requestConfig = buildRequestForModel(body);
+    const apiUrl = `${BASE_URL}/chat/completions`;
+    console.log(`[generate] model=${model} stream=${Boolean(body.stream)} → ${apiUrl}`);
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), requestConfig.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), 300000);
 
-    const apiUrl = `${BASE_URL}${requestConfig.path}`;
-    console.log(`[generate] model=${model} → ${apiUrl}`);
+    const apiResponse = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': API_KEY,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-    const { response, text } = await sendJsonRequest(apiUrl, API_KEY, requestConfig.body, controller.signal);
-
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      console.error(`[generate] Error ${response.status}:`, text.slice(0, 500));
-      return res.status(response.status).json({
-        error: `API 请求失败 (${response.status})`,
-        detail: text.slice(0, 500),
+    if (!apiResponse.ok) {
+      clearTimeout(timeout);
+      const errorText = await apiResponse.text();
+      console.error(`[generate] Error ${apiResponse.status}:`, errorText.slice(0, 500));
+      return res.status(apiResponse.status).json({
+        error: `API 请求失败 (${apiResponse.status})`,
+        detail: errorText.slice(0, 500),
       });
     }
 
+    if (body.stream && apiResponse.body) {
+      try {
+        await pipeStream(apiResponse, res);
+        return;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    clearTimeout(timeout);
+    const responseText = await apiResponse.text();
+
     try {
-      return res.status(200).json(JSON.parse(text));
+      return res.status(200).json(JSON.parse(responseText));
     } catch {
-      return res.status(200).json({ raw: text });
+      return res.status(200).json({ raw: responseText });
     }
   } catch (err) {
     if (err.name === 'AbortError') {

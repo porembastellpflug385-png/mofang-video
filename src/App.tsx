@@ -159,6 +159,28 @@ function extractVideoUrl(data: any): string | null {
   return null;
 }
 
+function extractTextFromStreamPayload(payload: any): string {
+  const delta = payload?.choices?.[0]?.delta?.content;
+  if (typeof delta === 'string') return delta;
+  if (Array.isArray(delta)) {
+    return delta
+      .map(part => {
+        if (typeof part === 'string') return part;
+        if (typeof part?.text === 'string') return part.text;
+        if (typeof part?.value === 'string') return part.value;
+        return '';
+      })
+      .join('');
+  }
+  const messageContent = payload?.choices?.[0]?.message?.content;
+  if (typeof messageContent === 'string') return messageContent;
+  return '';
+}
+
+function extractTaskId(payload: any): string | null {
+  return payload?.task_id || payload?.id || payload?.data?.task_id || payload?.data?.id || null;
+}
+
 /** 将比例字符串转为 Sora 的 size 格式 (WxH) */
 function ratioToSize(ratio: Ratio): string {
   const map: Record<string, string> = {
@@ -332,7 +354,7 @@ export default function App() {
     return {
       model: selectedModel,
       messages: [{ role: 'user', content }],
-      stream: false,
+      stream: selectedModel.startsWith('veo_') || selectedModel.startsWith('sora'),
     };
   }, [firstFrame, mode, omniImages, params, prompt, selectedModel]);
 
@@ -417,6 +439,82 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
       });
+      const contentType = res.headers.get('content-type') || '';
+      const isEventStream = contentType.includes('text/event-stream');
+
+      if (isEventStream && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let streamText = '';
+        let lastPayload: any = null;
+        let latestTaskId: string | null = null;
+        let latestStatus = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line.startsWith('data:')) continue;
+
+            const dataText = line.slice(5).trim();
+            if (!dataText || dataText === '[DONE]') continue;
+
+            try {
+              const payload = JSON.parse(dataText);
+              lastPayload = payload;
+
+              const deltaText = extractTextFromStreamPayload(payload);
+              if (deltaText) {
+                streamText += deltaText;
+                updateVideo(videoId, { errorMsg: streamText.slice(-160) });
+              }
+
+              const taskId = extractTaskId(payload);
+              if (taskId) latestTaskId = taskId;
+              if (payload?.status) latestStatus = String(payload.status).toLowerCase();
+            } catch {
+              streamText += dataText;
+              updateVideo(videoId, { errorMsg: streamText.slice(-160) });
+            }
+          }
+        }
+
+        const videoUrlFromPayload = lastPayload ? extractVideoUrl(lastPayload) : null;
+        const videoUrlFromText = streamText.match(/https?:\/\/[^\s"'<>)\]]+\.mp4[^\s"'<>)\]]*/) || streamText.match(/https?:\/\/[^\s"'<>)\]]+/);
+
+        if (videoUrlFromPayload || videoUrlFromText) {
+          updateVideo(videoId, {
+            status: 'completed',
+            videoUrl: videoUrlFromPayload || videoUrlFromText?.[0],
+            thumbnailUrl: lastPayload?.thumbnail_url || lastPayload?.data?.thumbnail_url,
+            errorMsg: undefined,
+          });
+          addToast('success', '视频生成完成！');
+          settle();
+          return;
+        }
+
+        if (latestTaskId) {
+          updateVideo(videoId, {
+            taskId: latestTaskId,
+            status: latestStatus === 'queued' ? 'queued' : 'generating',
+            errorMsg: undefined,
+          });
+          addToast('info', '任务已提交，正在生成中...');
+          startPolling(videoId, latestTaskId, model, settle);
+          return;
+        }
+
+        throw new Error(streamText || '流式响应未返回可用结果');
+      }
+
       const data = await res.json();
       if (!res.ok) {
         const detail =
@@ -809,6 +907,7 @@ export default function App() {
                       <div className="flex flex-col items-center text-cyan-400/80">
                         <div className="w-10 h-10 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mb-4 shadow-[0_0_20px_rgba(34,211,238,0.2)]" />
                         <span className="text-sm font-medium tracking-wider animate-pulse">AI 正在努力生成中...</span>
+                        {video.errorMsg && <p className="mt-3 px-4 text-[11px] leading-5 text-white/45 text-center line-clamp-4">{video.errorMsg}</p>}
                       </div>
                     ) : video.status === 'completed' ? (
                       <>
