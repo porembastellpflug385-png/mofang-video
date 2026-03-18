@@ -69,7 +69,7 @@ npm run dev
 npx vercel dev --listen 3001
 ```
 
-## 从原项目的改动
+## 从原项目的一些改动
 
 1. **安全**：移除了前端硬编码的 API URL 和 GEMINI_API_KEY 暴露
 2. **API 代理**：新增 `api/generate.ts` 和 `api/task.ts` 作为 Vercel Serverless 代理
