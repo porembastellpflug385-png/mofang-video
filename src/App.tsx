@@ -217,6 +217,14 @@ function parseDurationSeconds(duration?: string): number | undefined {
   return Number(matched[0]);
 }
 
+function getRatioCompatibilityHint(model: Model, ratio: Ratio): string | null {
+  if (!model.startsWith('veo')) return null;
+  if (ratio === '3:4' || ratio === '4:3') {
+    return '当前 Veo 渠道对 3:4 / 4:3 的兼容性不稳定，若失败建议改用 16:9、9:16 或智能模式。';
+  }
+  return null;
+}
+
 async function parseApiResponse(res: Response): Promise<any> {
   const text = await res.text();
   if (!text) return {};
@@ -575,7 +583,6 @@ export default function App() {
     if (selectedModel.startsWith('veo')) {
       const fullPrompt = buildFullPrompt(prompt, params);
       const ratioValue = ratio !== '智能模式' ? ratio : undefined;
-      const veoSize = ratioValue ? ratioToSize(ratioValue) : ratioToSize('16:9');
       const durationSeconds = parseDurationSeconds(duration);
       const firstImage = imageFileToDataUrl(firstFrame);
       const lastImage = imageFileToDataUrl(lastFrame);
@@ -600,7 +607,6 @@ export default function App() {
         first_image: firstImage,
         last_image: lastImage,
         aspect_ratio: ratioValue,
-        size: veoSize,
         duration: durationSeconds,
         seconds: durationSeconds,
         stream: false,
@@ -930,9 +936,10 @@ export default function App() {
         }
       }
 
-      const taskId = data.id || data.task_id;
-      if (taskId && data.status) {
-        updateVideo(videoId, { taskId, status: String(data.status).toLowerCase() === 'queued' ? 'queued' : 'generating' });
+      const taskId = data.id || data.task_id || data.data?.task_id || data.data?.id;
+      if (taskId) {
+        const normalizedStatus = String(data.status || data.data?.status || 'queued').toLowerCase();
+        updateVideo(videoId, { taskId, status: normalizedStatus === 'queued' ? 'queued' : 'generating' });
         addToast('info', '任务已提交，正在生成中...');
         startPolling(videoId, taskId, model, settle);
         return;
@@ -1209,6 +1216,11 @@ export default function App() {
                 </button>
               ))}
             </div>
+            {getRatioCompatibilityHint(selectedModel, ratio) && (
+              <p className="text-[11px] leading-5 text-amber-300/75">
+                {getRatioCompatibilityHint(selectedModel, ratio)}
+              </p>
+            )}
             {mode === 'omni' && (
               <p className="text-[11px] text-white/40">
                 全能参考模式下，尺寸会作为生成约束随提示词一起发送。
