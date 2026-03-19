@@ -81,6 +81,7 @@ const PARAM_CONFIG = [
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLL_COUNT = 240;
+const MAX_CONTENT_POLL_COUNT = 24;
 
 // ============ Helpers ============
 
@@ -646,6 +647,46 @@ export default function App() {
 
   const runQueuedGenerationRef = useRef<((model: Model) => void) | null>(null);
 
+  const waitForContentUrl = useCallback((videoId: string, contentId: string, model: Model, onSettled: () => void) => {
+    let count = 0;
+    const contentUrl = `/api/content?id=${encodeURIComponent(contentId)}&model=${encodeURIComponent(model)}`;
+
+    const pollContent = async () => {
+      count++;
+
+      if (count > MAX_CONTENT_POLL_COUNT) {
+        updateVideo(videoId, { status: 'failed', errorMsg: '成片文件尚未就绪，请稍后重试' });
+        addToast('error', '视频已完成但成片文件尚未就绪');
+        onSettled();
+        return;
+      }
+
+      try {
+        const response = await fetch(contentUrl, { method: 'GET', redirect: 'follow' });
+        if (response.ok) {
+          updateVideo(videoId, {
+            status: 'completed',
+            videoUrl: contentUrl,
+            errorMsg: undefined,
+          });
+          addToast('success', '视频生成完成！');
+          onSettled();
+          return;
+        }
+      } catch {
+        // swallow and retry
+      }
+
+      updateVideo(videoId, {
+        status: 'generating',
+        errorMsg: `任务已完成，正在获取成片文件（第 ${count}/${MAX_CONTENT_POLL_COUNT} 次）...`,
+      });
+      pollTimerRef.current[videoId] = setTimeout(pollContent, POLL_INTERVAL_MS);
+    };
+
+    void pollContent();
+  }, [addToast, updateVideo]);
+
   const startPolling = useCallback((videoId: string, taskId: string, model: Model, onSettled: () => void) => {
     let count = 0;
     const poll = async () => {
@@ -679,11 +720,15 @@ export default function App() {
         const isFailed = ['failed', 'error', 'cancelled', 'canceled'].includes(status);
 
         if (isCompleted) {
-          // 如果还没有 videoUrl，可能需要从 content 端点获取
           if (!videoUrl) {
             const completedId = data.id || data.data?.id || data.task_id || data.data?.task_id || taskId;
             if (completedId) {
-              videoUrl = `/api/content?id=${encodeURIComponent(completedId)}&model=${encodeURIComponent(model)}`;
+              updateVideo(videoId, {
+                status: 'generating',
+                errorMsg: '任务已完成，正在获取成片文件...',
+              });
+              waitForContentUrl(videoId, completedId, model, onSettled);
+              return;
             }
           }
           updateVideo(videoId, { status: 'completed', videoUrl: videoUrl || undefined, thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url });
@@ -712,7 +757,7 @@ export default function App() {
       }
     };
     pollTimerRef.current[videoId] = setTimeout(poll, POLL_INTERVAL_MS);
-  }, [updateVideo, addToast]);
+  }, [updateVideo, addToast, waitForContentUrl]);
 
   const startResultPolling = useCallback((videoId: string, completionId: string, model: Model, onSettled: () => void) => {
     let count = 0;
