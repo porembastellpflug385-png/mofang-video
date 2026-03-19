@@ -97,8 +97,48 @@ function fileToBase64(file: File): Promise<{ base64: string; mimeType: string }>
   });
 }
 
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('图片加载失败'));
+    image.src = url;
+  });
+}
+
+async function compressImageFile(file: File): Promise<{ base64: string; mimeType: string }> {
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await loadImage(objectUrl);
+    const maxEdge = 1600;
+    const scale = Math.min(1, maxEdge / Math.max(image.width, image.height));
+    const width = Math.max(1, Math.round(image.width * scale));
+    const height = Math.max(1, Math.round(image.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('图片压缩失败');
+    }
+
+    context.drawImage(image, 0, 0, width, height);
+    const mimeType = 'image/jpeg';
+    const dataUrl = canvas.toDataURL(mimeType, 0.82);
+    return {
+      base64: dataUrl.split(',')[1],
+      mimeType,
+    };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function fileToImageFile(file: File): Promise<ImageFile> {
-  const { base64, mimeType } = await fileToBase64(file);
+  const { base64, mimeType } = await compressImageFile(file);
   const url = URL.createObjectURL(file);
   return { url, base64, mimeType };
 }
@@ -175,6 +215,16 @@ function parseDurationSeconds(duration?: string): number | undefined {
   const matched = duration.match(/\d+/);
   if (!matched) return undefined;
   return Number(matched[0]);
+}
+
+async function parseApiResponse(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text, detail: text };
+  }
 }
 
 function extractVideoUrl(data: any): string | null {
@@ -819,7 +869,7 @@ export default function App() {
         throw new Error(streamText || '流式响应未返回可用结果');
       }
 
-      const data = await res.json();
+      const data = await parseApiResponse(res);
       if (!res.ok) {
         const detail =
           data.detail ||
