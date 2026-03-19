@@ -227,6 +227,28 @@ async function parseApiResponse(res: Response): Promise<any> {
   }
 }
 
+function normalizeApiErrorMessage(detail: unknown): string {
+  if (typeof detail !== 'string') {
+    return typeof detail === 'object' && detail ? JSON.stringify(detail).slice(0, 300) : '请求失败';
+  }
+
+  try {
+    const parsed = JSON.parse(detail);
+    const upstreamMessage = parsed?.upstream_message;
+    if (typeof upstreamMessage === 'string') {
+      try {
+        const upstreamParsed = JSON.parse(upstreamMessage);
+        return upstreamParsed?.message || upstreamParsed?.error?.message || upstreamMessage;
+      } catch {
+        return upstreamMessage;
+      }
+    }
+    return parsed?.message || parsed?.error?.message || detail;
+  } catch {
+    return detail;
+  }
+}
+
 function extractVideoUrl(data: any): string | null {
   try {
     const choices = data.choices || [];
@@ -553,6 +575,7 @@ export default function App() {
     if (selectedModel.startsWith('veo')) {
       const fullPrompt = buildFullPrompt(prompt, params);
       const ratioValue = ratio !== '智能模式' ? ratio : undefined;
+      const veoSize = ratioValue ? ratioToSize(ratioValue) : ratioToSize('16:9');
       const durationSeconds = parseDurationSeconds(duration);
       const firstImage = imageFileToDataUrl(firstFrame);
       const lastImage = imageFileToDataUrl(lastFrame);
@@ -577,6 +600,7 @@ export default function App() {
         first_image: firstImage,
         last_image: lastImage,
         aspect_ratio: ratioValue,
+        size: veoSize,
         duration: durationSeconds,
         seconds: durationSeconds,
         stream: false,
@@ -877,7 +901,7 @@ export default function App() {
           data.error?.message ||
           data.error ||
           `请求失败 (${res.status})`;
-        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail).slice(0, 300));
+        throw new Error(normalizeApiErrorMessage(detail));
       }
 
       const msgContent = data.choices?.[0]?.message?.content;
