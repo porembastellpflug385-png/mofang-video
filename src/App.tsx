@@ -50,12 +50,13 @@ interface VideoRecord {
 }
 
 interface GenerateRequestBody {
-  model: Model;
+  model: string;
   messages?: Array<{
     role: 'user';
     content: any[];
   }>;
   prompt?: string;
+  enhance_prompt?: boolean;
   image?: string;
   images?: string[];
   first_image?: string;
@@ -220,10 +221,20 @@ function parseDurationSeconds(duration?: string): number | undefined {
 
 function getRatioCompatibilityHint(model: Model, ratio: Ratio): string | null {
   if (!model.startsWith('veo')) return null;
-  if (ratio === '3:4' || ratio === '4:3') {
-    return '当前 Veo 渠道对 3:4 / 4:3 的兼容性不稳定，若失败建议改用 16:9、9:16 或智能模式。';
+  if (ratio === '3:4' || ratio === '4:3' || ratio === '1:1') {
+    return '当前 Veo 接口仅明确支持 16:9 和 9:16。选择 3:4、4:3、1:1 或智能模式时，将不传 aspect_ratio，由上游自动判断。';
   }
   return null;
+}
+
+function getVeoAspectRatio(ratio: Ratio): '16:9' | '9:16' | undefined {
+  if (ratio === '16:9' || ratio === '9:16') return ratio;
+  return undefined;
+}
+
+function getVeoApiModel(selectedModel: Model, mode: GenerationMode): string {
+  if (mode === 'omni') return 'veo3.1-components';
+  return selectedModel === 'veo3.1-4k' ? 'veo3.1-pro' : 'veo3.1';
 }
 
 async function parseApiResponse(res: Response): Promise<any> {
@@ -258,6 +269,31 @@ function normalizeApiErrorMessage(detail: unknown): string {
   }
 }
 
+function findFirstMatchingValue(data: unknown, matcher: (key: string, value: unknown) => boolean, visited = new Set<unknown>()): string | null {
+  if (!data || typeof data !== 'object') return null;
+  if (visited.has(data)) return null;
+  visited.add(data);
+
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const found = findFirstMatchingValue(item, matcher, visited);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(data)) {
+    if (matcher(key, value) && typeof value === 'string') return value;
+  }
+
+  for (const value of Object.values(data)) {
+    const found = findFirstMatchingValue(value, matcher, visited);
+    if (found) return found;
+  }
+
+  return null;
+}
+
 function extractVideoUrl(data: any): string | null {
   try {
     const choices = data.choices || [];
@@ -272,18 +308,23 @@ function extractVideoUrl(data: any): string | null {
         }
       }
     }
-    if (data.data?.url) return data.data.url;
-    if (data.output?.video_url) return data.output.video_url;
-    if (data.output?.url) return data.output.url;
-    if (data.result?.video_url) return data.result.video_url;
-    if (data.result?.url) return data.result.url;
-    if (data.data?.result?.video_url) return data.data.result.video_url;
-    if (data.data?.result?.url) return data.data.result.url;
-    if (data.data?.output?.video_url) return data.data.output.video_url;
-    if (data.data?.output?.url) return data.data.output.url;
-    if (data.task_result?.videos?.[0]?.url) return data.task_result.videos[0].url;
-    if (data.task_result?.videos?.[0]?.video_url) return data.task_result.videos[0].video_url;
-    if (data.data?.videos?.[0]?.video_url) return data.data.videos[0].video_url;
+
+    return findFirstMatchingValue(
+      data,
+      (key, value) =>
+        typeof value === 'string' &&
+        /^https?:\/\//.test(value) &&
+        (
+          key === 'url' ||
+          key === 'video_url' ||
+          key === 'download_url' ||
+          key === 'content_url' ||
+          key === 'signed_url' ||
+          value.includes('.mp4') ||
+          value.includes('/video/') ||
+          value.includes('/videos/')
+        )
+    );
   } catch {}
   return null;
 }
@@ -607,11 +648,10 @@ export default function App() {
   const buildRequestBody = useCallback((): GenerateRequestBody => {
     if (selectedModel.startsWith('veo')) {
       const fullPrompt = buildFullPrompt(prompt, params);
-      const ratioValue = ratio !== '智能模式' ? ratio : undefined;
-      const durationSeconds = parseDurationSeconds(duration);
+      const ratioValue = getVeoAspectRatio(ratio);
       const firstImage = imageFileToDataUrl(firstFrame);
       const lastImage = imageFileToDataUrl(lastFrame);
-      const omniImageUrls = omniImages.map(image => imageFileToDataUrl(image)).filter(Boolean) as string[];
+      const omniImageUrls = omniImages.map(image => imageFileToDataUrl(image)).filter(Boolean).slice(0, 3) as string[];
 
       let veoPrompt = fullPrompt;
       if (mode === 'first-last') {
@@ -623,17 +663,13 @@ export default function App() {
       }
 
       return {
-        model: selectedModel,
+        model: getVeoApiModel(selectedModel, mode),
         prompt: veoPrompt,
-        image: mode === 'first-last' ? firstImage : omniImageUrls[0],
         images: mode === 'first-last'
           ? [firstImage, lastImage].filter(Boolean) as string[]
           : omniImageUrls,
-        first_image: firstImage,
-        last_image: lastImage,
+        enhance_prompt: false,
         aspect_ratio: ratioValue,
-        duration: durationSeconds,
-        seconds: durationSeconds,
         stream: false,
       };
     }
@@ -1043,6 +1079,10 @@ export default function App() {
   const handleGenerate = async () => {
     if (mode === 'first-last' && !firstFrame) { addToast('error', '请至少上传首帧图'); return; }
     if (mode === 'omni' && omniImages.length === 0) { addToast('error', '请至少上传一张参考图'); return; }
+    if (selectedModel.startsWith('veo') && mode === 'omni' && omniImages.length > 3) {
+      addToast('error', 'Veo 全能参考模式最多支持 3 张参考图');
+      return;
+    }
     if (!prompt.trim()) { addToast('error', '请输入提示词'); return; }
 
     const videoId = Date.now().toString();

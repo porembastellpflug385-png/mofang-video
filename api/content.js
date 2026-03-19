@@ -5,81 +5,62 @@
  * GET {BASE}/videos/{id}/content
  */
 
+function findFirstMatchingValue(data, matcher, visited = new Set()) {
+  if (!data || typeof data !== 'object') return null;
+  if (visited.has(data)) return null;
+  visited.add(data);
+
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const found = findFirstMatchingValue(item, matcher, visited);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(data)) {
+    if (matcher(key, value)) return value;
+  }
+
+  for (const value of Object.values(data)) {
+    const found = findFirstMatchingValue(value, matcher, visited);
+    if (found) return found;
+  }
+
+  return null;
+}
+
 function extractMediaUrl(data) {
-  return (
-    data?.video_url ||
-    data?.url ||
-    data?.download_url ||
-    data?.content_url ||
-    data?.data?.video_url ||
-    data?.data?.url ||
-    data?.data?.download_url ||
-    data?.data?.content_url ||
-    data?.data?.video?.url ||
-    data?.data?.result?.url ||
-    data?.data?.result?.video_url ||
-    data?.data?.output?.url ||
-    data?.data?.output?.video_url ||
-    data?.data?.videos?.[0]?.url ||
-    data?.data?.videos?.[0]?.video_url ||
-    data?.data?.videos?.[0]?.download_url ||
-    data?.data?.videos?.[0]?.content_url ||
-    data?.data?.videos?.[0]?.signed_url ||
-    data?.data?.assets?.[0]?.url ||
-    data?.data?.assets?.[0]?.download_url ||
-    data?.data?.assets?.[0]?.signed_url ||
-    data?.task_result?.url ||
-    data?.task_result?.video_url ||
-    data?.task_result?.videos?.[0]?.url ||
-    data?.task_result?.videos?.[0]?.video_url ||
-    data?.task_result?.videos?.[0]?.download_url ||
-    data?.task_result?.videos?.[0]?.signed_url ||
-    data?.task_result?.assets?.[0]?.url ||
-    data?.task_result?.assets?.[0]?.download_url ||
-    data?.task_result?.assets?.[0]?.signed_url ||
-    data?.result?.url ||
-    data?.result?.video_url ||
-    data?.result?.videos?.[0]?.url ||
-    data?.result?.videos?.[0]?.video_url ||
-    data?.result?.assets?.[0]?.url ||
-    data?.output?.url ||
-    data?.output?.video_url ||
-    data?.output?.videos?.[0]?.url ||
-    data?.output?.videos?.[0]?.video_url ||
-    data?.output?.assets?.[0]?.url ||
-    null
+  return findFirstMatchingValue(
+    data,
+    (key, value) =>
+      typeof value === 'string' &&
+      /^https?:\/\//.test(value) &&
+      (
+        key === 'url' ||
+        key === 'video_url' ||
+        key === 'download_url' ||
+        key === 'content_url' ||
+        key === 'signed_url' ||
+        value.includes('.mp4') ||
+        value.includes('/video/') ||
+        value.includes('/videos/')
+      )
   );
 }
 
 function extractMediaId(data) {
-  return (
-    data?.video_id ||
-    data?.file_id ||
-    data?.content_id ||
-    data?.output_id ||
-    data?.data?.video_id ||
-    data?.data?.file_id ||
-    data?.data?.content_id ||
-    data?.data?.output_id ||
-    data?.data?.video?.id ||
-    data?.data?.videos?.[0]?.id ||
-    data?.data?.assets?.[0]?.id ||
-    data?.task_result?.video_id ||
-    data?.task_result?.file_id ||
-    data?.task_result?.content_id ||
-    data?.task_result?.output_id ||
-    data?.task_result?.video?.id ||
-    data?.task_result?.videos?.[0]?.id ||
-    data?.task_result?.assets?.[0]?.id ||
-    data?.result?.video_id ||
-    data?.result?.file_id ||
-    data?.result?.videos?.[0]?.id ||
-    data?.result?.assets?.[0]?.id ||
-    data?.output?.video_id ||
-    data?.output?.file_id ||
-    data?.output?.videos?.[0]?.id ||
-    data?.output?.assets?.[0]?.id ||
-    null
+  return findFirstMatchingValue(
+    data,
+    (key, value) =>
+      typeof value === 'string' &&
+      (
+        key === 'video_id' ||
+        key === 'file_id' ||
+        key === 'content_id' ||
+        key === 'output_id' ||
+        (key === 'id' && (value.startsWith('video_') || value.startsWith('file_') || value.startsWith('asset_')))
+      )
   );
 }
 
