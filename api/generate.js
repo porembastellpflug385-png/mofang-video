@@ -13,7 +13,7 @@ export const config = {
 
 function getApiConfigForModel(model = '') {
   const isSora = model.startsWith('sora');
-  const isVeo = model.startsWith('veo_');
+  const isVeo = model.startsWith('veo');
 
   if (isSora) {
     return {
@@ -86,7 +86,7 @@ export default async function handler(req, res) {
     const { baseUrl: BASE_URL, apiKey: API_KEY, generateUrl } = getApiConfigForModel(model);
 
     if (!BASE_URL || !API_KEY) {
-      const envPrefix = model.startsWith('sora') ? 'SORA_' : model.startsWith('veo_') ? 'VEO_' : '默认';
+      const envPrefix = model.startsWith('sora') ? 'SORA_' : model.startsWith('veo') ? 'VEO_' : '默认';
       return res.status(500).json({ error: `服务端配置错误，请检查 ${envPrefix} 环境变量` });
     }
 

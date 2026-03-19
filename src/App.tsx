@@ -3,7 +3,7 @@ import { Settings, Image as ImageIcon, Video, Download, Trash2, Plus, X, Chevron
 
 // ============ Types ============
 
-type Model = 'sora-2' | 'veo_3_1-4K' | 'veo_3_1-fast-4K' | 'grok-video-3-10s' | 'grok-video-3';
+type Model = 'sora-2' | 'veo3.1-4k' | 'veo3.1-fast' | 'grok-video-3-10s' | 'grok-video-3';
 type GenerationMode = 'first-last' | 'omni';
 type Ratio = '16:9' | '4:3' | '1:1' | '3:4' | '9:16' | '智能模式';
 type UiMode = 'basic' | 'pro';
@@ -19,8 +19,8 @@ interface ModelConfig {
 
 const MODEL_CONFIGS: Record<Model, ModelConfig> = {
   'sora-2':            { label: 'Sora 2',              durations: ['4秒', '8秒', '12秒'], qualities: [], category: '标准视频', capabilities: ['独立渠道', '支持时长', '适合高质感镜头'] },
-  'veo_3_1-4K':        { label: 'Veo 3.1 4K',         durations: [],                      qualities: [], category: '流式视频', capabilities: ['实时进度', '高保真运镜', '适合广告级镜头'], warning: '当前渠道仅稳定返回进度，最终结果回收依赖上游接口能力。' },
-  'veo_3_1-fast-4K':   { label: 'Veo 3.1 Fast 4K',    durations: [],                      qualities: [], category: '流式视频', capabilities: ['实时进度', '提交更快', '适合高频试片'], warning: '当前渠道仅稳定返回进度，最终结果回收依赖上游接口能力。' },
+  'veo3.1-4k':         { label: 'Veo 3.1 4K',         durations: [],                      qualities: [], category: '异步视频', capabilities: ['专用生成接口', '高保真运镜', '适合广告级镜头'] },
+  'veo3.1-fast':       { label: 'Veo 3.1 Fast',       durations: [],                      qualities: [], category: '异步视频', capabilities: ['专用生成接口', '提交更快', '适合高频试片'] },
   'grok-video-3-10s':  { label: 'Grok Video 3 (10s)',  durations: [],                      qualities: [], category: '快速视频', capabilities: ['链路稳定', '结果直出', '适合批量出片'] },
   'grok-video-3':      { label: 'Grok Video 3',        durations: [],                      qualities: [], category: '快速视频', capabilities: ['链路稳定', '结果直出', '适合批量出片'] },
 };
@@ -351,7 +351,7 @@ function Toast({ messages, onDismiss }: { messages: ToastMessage[]; onDismiss: (
 
 export default function App() {
   const [uiMode, setUiMode] = useState<UiMode>('basic');
-  const [selectedModel, setSelectedModel] = useState<Model>('veo_3_1-4K');
+  const [selectedModel, setSelectedModel] = useState<Model>('veo3.1-4k');
   const [mode, setMode] = useState<GenerationMode>('first-last');
   const [ratio, setRatio] = useState<Ratio>('智能模式');
   const [duration, setDuration] = useState<string>('默认');

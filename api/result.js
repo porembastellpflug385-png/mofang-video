@@ -1,5 +1,5 @@
 /**
- * GET /api/result?id=xxx&model=veo_3_1-fast-4K
+ * GET /api/result?id=xxx&model=veo3.1-fast
  *
  * 用 completion id 查询最终结果。
  * 兼容不同中转实现，优先尝试 chat/completions/{id}，

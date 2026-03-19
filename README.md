@@ -39,7 +39,7 @@ Vercel 会自动识别 Vite 项目并构建部署。
 
 ```json
 {
-  "model": "veo_3_1-4K",
+  "model": "veo3.1-4k",
   "messages": [
     {
       "role": "user",

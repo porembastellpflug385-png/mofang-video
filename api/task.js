@@ -4,7 +4,7 @@
  * 查询视频生成任务状态
  * 
  * 端点：
- *   - sora / veo_ 系列: GET {BASE}/videos/{id}
+ *   - sora / veo 系列:  GET {BASE}/videos/{id}
  *   - 视频统一格式:     GET {BASE}/videos/generations/{id}
  *   - 回退自动尝试两个
  * 
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
   }
 
   const isSora = model.startsWith('sora');
-  const isVeo = model.startsWith('veo_');
+  const isVeo = model.startsWith('veo');
   const BASE_URL =
     (isSora
       ? process.env.SORA_OPENAI_BASE_URL || process.env.SORA_API_BASE_URL
@@ -53,7 +53,7 @@ export default async function handler(req, res) {
 
   // 根据模型选择轮询端点
   let primaryPath, fallbackPath;
-  if (model.startsWith('veo_')) {
+  if (model.startsWith('veo')) {
     primaryPath = `/videos/generations/${taskId}`;
     fallbackPath = `/videos/${taskId}`;
   } else if (model.startsWith('sora')) {

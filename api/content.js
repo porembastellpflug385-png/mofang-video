@@ -17,7 +17,7 @@ export default async function handler(req, res) {
   }
 
   const isSora = model.startsWith('sora');
-  const isVeo = model.startsWith('veo_');
+  const isVeo = model.startsWith('veo');
   const BASE_URL =
     (isSora
       ? process.env.SORA_OPENAI_BASE_URL || process.env.SORA_API_BASE_URL
