@@ -80,7 +80,7 @@ const PARAM_CONFIG = [
 ];
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_POLL_COUNT = 120;
+const MAX_POLL_COUNT = 240;
 
 // ============ Helpers ============
 
@@ -273,8 +273,32 @@ function extractVideoUrl(data: any): string | null {
     }
     if (data.data?.url) return data.data.url;
     if (data.output?.video_url) return data.output.video_url;
+    if (data.output?.url) return data.output.url;
+    if (data.result?.video_url) return data.result.video_url;
+    if (data.result?.url) return data.result.url;
+    if (data.data?.result?.video_url) return data.data.result.video_url;
+    if (data.data?.result?.url) return data.data.result.url;
+    if (data.data?.output?.video_url) return data.data.output.video_url;
+    if (data.data?.output?.url) return data.data.output.url;
+    if (data.task_result?.videos?.[0]?.url) return data.task_result.videos[0].url;
+    if (data.task_result?.videos?.[0]?.video_url) return data.task_result.videos[0].video_url;
+    if (data.data?.videos?.[0]?.video_url) return data.data.videos[0].video_url;
   } catch {}
   return null;
+}
+
+function extractTaskStatus(data: any): string {
+  return String(
+    data?.status ||
+    data?.state ||
+    data?.task_status ||
+    data?.data?.status ||
+    data?.data?.state ||
+    data?.data?.task_status ||
+    data?.task_result?.status ||
+    data?.result?.status ||
+    ''
+  ).toLowerCase();
 }
 
 function getStatusMeta(video: VideoRecord) {
@@ -638,7 +662,7 @@ export default function App() {
         if (!res.ok) throw new Error(data.error || data.detail || '查询失败');
 
         // 兼容多种返回格式
-        const status = (data.status || data.data?.status || '').toLowerCase();
+        const status = extractTaskStatus(data);
         
         // 提取视频URL —— 兼容各种格式
         let videoUrl: string | null = null;
@@ -651,7 +675,10 @@ export default function App() {
           || data.task_result?.url
           || extractVideoUrl(data);
 
-        if (status === 'completed' || status === 'success' || status === 'Completed') {
+        const isCompleted = ['completed', 'complete', 'success', 'succeeded', 'done', 'finished'].includes(status) || Boolean(videoUrl);
+        const isFailed = ['failed', 'error', 'cancelled', 'canceled'].includes(status);
+
+        if (isCompleted) {
           // 如果还没有 videoUrl，可能需要从 content 端点获取
           if (!videoUrl) {
             const completedId = data.id || data.data?.id || data.task_id || data.data?.task_id || taskId;
@@ -664,7 +691,7 @@ export default function App() {
           onSettled();
           return;
         }
-        if (status === 'failed' || status === 'error') {
+        if (isFailed) {
           const errMsg = data.error?.message || data.error || data.message || data.data?.error || '生成失败';
           updateVideo(videoId, { status: 'failed', errorMsg: typeof errMsg === 'string' ? errMsg : '生成失败' });
           addToast('error', '视频生成失败');
