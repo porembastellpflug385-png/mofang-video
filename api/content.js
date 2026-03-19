@@ -40,18 +40,38 @@ export default async function handler(req, res) {
   }
 
   try {
-    const apiUrl = `${BASE_URL}/videos/${videoId}/content`;
-    const apiResponse = await fetch(apiUrl, {
-      method: 'GET',
-      headers: { 'Authorization': API_KEY },
-      redirect: 'follow',
-    });
+    const paths = isVeo
+      ? [`/videos/generations/${videoId}/content`, `/videos/${videoId}/content`]
+      : [`/videos/${videoId}/content`];
 
-    if (!apiResponse.ok) {
-      const errorText = await apiResponse.text();
-      return res.status(apiResponse.status).json({
-        error: `获取视频内容失败 (${apiResponse.status})`,
-        detail: errorText.slice(0, 500),
+    let apiResponse = null;
+    let responseText = '';
+
+    for (const path of paths) {
+      const apiUrl = `${BASE_URL}${path}`;
+      apiResponse = await fetch(apiUrl, {
+        method: 'GET',
+        headers: { 'Authorization': API_KEY },
+        redirect: 'follow',
+      });
+
+      if (apiResponse.ok) {
+        break;
+      }
+
+      responseText = await apiResponse.text();
+      if (apiResponse.status !== 404) {
+        return res.status(apiResponse.status).json({
+          error: `获取视频内容失败 (${apiResponse.status})`,
+          detail: responseText.slice(0, 500),
+        });
+      }
+    }
+
+    if (!apiResponse || !apiResponse.ok) {
+      return res.status(apiResponse?.status || 404).json({
+        error: `获取视频内容失败 (${apiResponse?.status || 404})`,
+        detail: responseText.slice(0, 500),
       });
     }
 

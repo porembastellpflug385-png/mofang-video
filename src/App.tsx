@@ -653,9 +653,11 @@ export default function App() {
 
         if (status === 'completed' || status === 'success' || status === 'Completed') {
           // 如果还没有 videoUrl，可能需要从 content 端点获取
-          if (!videoUrl && data.id) {
-            // 尝试拼接内容下载 URL
-            videoUrl = `/api/content?id=${encodeURIComponent(data.id)}&model=${encodeURIComponent(model)}`;
+          if (!videoUrl) {
+            const completedId = data.id || data.data?.id || data.task_id || data.data?.task_id || taskId;
+            if (completedId) {
+              videoUrl = `/api/content?id=${encodeURIComponent(completedId)}&model=${encodeURIComponent(model)}`;
+            }
           }
           updateVideo(videoId, { status: 'completed', videoUrl: videoUrl || undefined, thumbnailUrl: data.thumbnail_url || data.data?.thumbnail_url });
           addToast('success', '视频生成完成！');
