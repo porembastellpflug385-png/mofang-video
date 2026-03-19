@@ -13,6 +13,7 @@ export const config = {
 
 function getApiConfigForModel(model = '') {
   const isSora = model.startsWith('sora');
+  const isVeo = model.startsWith('veo_');
 
   if (isSora) {
     return {
@@ -26,12 +27,31 @@ function getApiConfigForModel(model = '') {
         process.env.SORA_API_KEY ||
         process.env.OPENAI_API_KEY ||
         process.env.API_KEY,
+      generateUrl: null,
+    };
+  }
+
+  if (isVeo) {
+    return {
+      baseUrl:
+        process.env.VEO_OPENAI_BASE_URL ||
+        process.env.VEO_API_BASE_URL ||
+        'https://ai.t8star.cn/v2',
+      apiKey:
+        process.env.VEO_OPENAI_API_KEY ||
+        process.env.VEO_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        process.env.API_KEY,
+      generateUrl:
+        process.env.VEO_GENERATE_URL ||
+        'https://ai.t8star.cn/v2/videos/generations',
     };
   }
 
   return {
     baseUrl: process.env.OPENAI_BASE_URL || process.env.API_BASE_URL,
     apiKey: process.env.OPENAI_API_KEY || process.env.API_KEY,
+    generateUrl: null,
   };
 }
 
@@ -63,13 +83,14 @@ export default async function handler(req, res) {
   try {
     const body = req.body;
     const model = body.model || '';
-    const { baseUrl: BASE_URL, apiKey: API_KEY } = getApiConfigForModel(model);
+    const { baseUrl: BASE_URL, apiKey: API_KEY, generateUrl } = getApiConfigForModel(model);
 
     if (!BASE_URL || !API_KEY) {
-      return res.status(500).json({ error: `服务端配置错误，请检查 ${model.startsWith('sora') ? 'SORA_' : '默认'} 环境变量` });
+      const envPrefix = model.startsWith('sora') ? 'SORA_' : model.startsWith('veo_') ? 'VEO_' : '默认';
+      return res.status(500).json({ error: `服务端配置错误，请检查 ${envPrefix} 环境变量` });
     }
 
-    const apiUrl = `${BASE_URL}/chat/completions`;
+    const apiUrl = generateUrl || `${BASE_URL}/chat/completions`;
     console.log(`[generate] model=${model} stream=${Boolean(body.stream)} → ${apiUrl}`);
 
     const controller = new AbortController();

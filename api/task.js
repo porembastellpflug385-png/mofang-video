@@ -24,21 +24,26 @@ export default async function handler(req, res) {
   }
 
   const isSora = model.startsWith('sora');
+  const isVeo = model.startsWith('veo_');
   const BASE_URL =
     (isSora
       ? process.env.SORA_OPENAI_BASE_URL || process.env.SORA_API_BASE_URL
+      : isVeo
+        ? process.env.VEO_OPENAI_BASE_URL || process.env.VEO_API_BASE_URL || 'https://ai.t8star.cn/v2'
       : undefined) ||
     process.env.OPENAI_BASE_URL ||
     process.env.API_BASE_URL;
   const API_KEY =
     (isSora
       ? process.env.SORA_OPENAI_API_KEY || process.env.SORA_API_KEY
+      : isVeo
+        ? process.env.VEO_OPENAI_API_KEY || process.env.VEO_API_KEY
       : undefined) ||
     process.env.OPENAI_API_KEY ||
     process.env.API_KEY;
 
   if (!BASE_URL || !API_KEY) {
-    return res.status(500).json({ error: `服务端配置错误，请检查 ${isSora ? 'SORA_' : '默认'} 环境变量` });
+    return res.status(500).json({ error: `服务端配置错误，请检查 ${isSora ? 'SORA_' : isVeo ? 'VEO_' : '默认'} 环境变量` });
   }
 
   const headers = {
@@ -48,8 +53,10 @@ export default async function handler(req, res) {
 
   // 根据模型选择轮询端点
   let primaryPath, fallbackPath;
-  if (model.startsWith('sora') || model.startsWith('veo_')) {
-    // openAI视频格式
+  if (model.startsWith('veo_')) {
+    primaryPath = `/videos/generations/${taskId}`;
+    fallbackPath = `/videos/${taskId}`;
+  } else if (model.startsWith('sora')) {
     primaryPath = `/videos/${taskId}`;
     fallbackPath = `/videos/generations/${taskId}`;
   } else {

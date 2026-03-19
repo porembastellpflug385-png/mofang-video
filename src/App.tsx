@@ -88,6 +88,12 @@ function fileToBase64(file: File): Promise<{ base64: string; mimeType: string }>
   });
 }
 
+async function fileToImageFile(file: File): Promise<ImageFile> {
+  const { base64, mimeType } = await fileToBase64(file);
+  const url = URL.createObjectURL(file);
+  return { url, base64, mimeType };
+}
+
 function buildFullPrompt(prompt: string, params: Record<string, string[]>): string {
   const tags = Object.entries(params)
     .flatMap(([_, values]) => values)
@@ -142,7 +148,12 @@ function buildMessages(
   }
 
   content.push({ type: 'text', text: textPrompt });
-  return [{ role: 'user', content }];
+  return [{ role: 'user' as const, content }];
+}
+
+function buildOmniReferenceHint(imageCount: number): string {
+  if (imageCount <= 0) return '';
+  return Array.from({ length: imageCount }, (_, index) => `@图 ${index + 1}`).join('、');
 }
 
 function extractVideoUrl(data: any): string | null {
@@ -395,19 +406,42 @@ export default function App() {
   }, []);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'first' | 'last' | 'omni') => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 20 * 1024 * 1024) {
-      addToast('error', '图片大小不能超过 20MB');
+    const files: File[] = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+
+    if (type !== 'omni') {
+      const file = files[0];
+      if (file.size > 20 * 1024 * 1024) {
+        addToast('error', '图片大小不能超过 20MB');
+        e.target.value = '';
+        return;
+      }
+      try {
+        const imageFile = await fileToImageFile(file);
+        if (type === 'first') setFirstFrame(imageFile);
+        else setLastFrame(imageFile);
+      } catch {
+        addToast('error', '图片读取失败，请重试');
+      }
+      e.target.value = '';
       return;
     }
+
+    const oversizedFiles = files.filter(file => file.size > 20 * 1024 * 1024);
+    if (oversizedFiles.length > 0) {
+      addToast('error', `有 ${oversizedFiles.length} 张图片超过 20MB，已跳过`);
+    }
+
+    const validFiles = files.filter(file => file.size <= 20 * 1024 * 1024);
+    if (validFiles.length === 0) {
+      e.target.value = '';
+      return;
+    }
+
     try {
-      const { base64, mimeType } = await fileToBase64(file);
-      const url = URL.createObjectURL(file);
-      const imageFile: ImageFile = { url, base64, mimeType };
-      if (type === 'first') setFirstFrame(imageFile);
-      else if (type === 'last') setLastFrame(imageFile);
-      else setOmniImages(prev => [...prev, imageFile]);
+      const imageFiles = await Promise.all(validFiles.map(fileToImageFile));
+      setOmniImages(prev => [...prev, ...imageFiles]);
+      addToast('success', `已添加 ${imageFiles.length} 张参考图，可在提示词中用 @图 1、@图 2 的方式引用`);
     } catch {
       addToast('error', '图片读取失败，请重试');
     }
@@ -445,26 +479,12 @@ export default function App() {
   }, []);
 
   const buildRequestBody = useCallback((): GenerateRequestBody => {
-    const fullPrompt = buildFullPrompt(prompt, params);
-    const content: any[] = [];
-
-    if (mode === 'first-last' && firstFrame) {
-      content.push({ type: 'image_url', image_url: { url: `data:${firstFrame.mimeType};base64,${firstFrame.base64}` } });
-    }
-    if (mode === 'omni') {
-      for (const img of omniImages) {
-        content.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
-      }
-    }
-
-    content.push({ type: 'text', text: fullPrompt });
-
     return {
       model: selectedModel,
-      messages: [{ role: 'user', content }],
-      stream: selectedModel.startsWith('veo_') || selectedModel.startsWith('sora'),
+      messages: buildMessages(prompt, selectedModel, ratio, mode, params, firstFrame, lastFrame, omniImages),
+      stream: selectedModel.startsWith('sora'),
     };
-  }, [firstFrame, mode, omniImages, params, prompt, selectedModel]);
+  }, [firstFrame, lastFrame, mode, omniImages, params, prompt, ratio, selectedModel]);
 
   const runQueuedGenerationRef = useRef<((model: Model) => void) | null>(null);
 
@@ -1018,8 +1038,15 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-                <input type="file" ref={omniRef} className="hidden" accept="image/*" onChange={e => handleFileUpload(e, 'omni')} />
-                <p className="text-[11px] text-cyan-400/60 flex items-center"><Sparkles className="w-3 h-3 mr-1"/> 提示：在提示词中输入 @图1, @图2 引用图片</p>
+                <input type="file" ref={omniRef} className="hidden" accept="image/*" multiple onChange={e => handleFileUpload(e, 'omni')} />
+                <div className="space-y-1">
+                  <p className="text-[11px] text-cyan-400/60 flex items-center"><Sparkles className="w-3 h-3 mr-1"/> 支持一次选择多张参考图，并在提示词中使用 `@图 1`、`@图 2`、`@图 3` 的方式引用。</p>
+                  {omniImages.length > 0 && (
+                    <p className="text-[11px] text-white/40">
+                      当前可引用：{buildOmniReferenceHint(omniImages.length)}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1027,7 +1054,7 @@ export default function App() {
           {/* Prompt */}
           <div className="relative group">
             <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
-              placeholder={mode === 'omni' ? "描述视频内容，例如：@图1 的角色，正在 @图2 的场景中奔跑..." : "描述视频内容，支持中文和英文..."}
+              placeholder={mode === 'omni' ? "描述视频内容，例如：@图 1 的角色向着 @图 2 里的高楼奔跑，并从背包里拿出 @图 3 的水喝了一口..." : "描述视频内容，支持中文和英文..."}
               className="w-full h-36 bg-black/40 border border-white/10 text-white p-4 rounded-2xl resize-none focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 text-sm transition-all shadow-inner placeholder:text-white/30" />
             {uiMode === 'pro' ? (
               <button onClick={() => setShowParams(true)}
@@ -1170,20 +1197,26 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
               {videos.map(video => (
                 <div key={video.id} className="bg-white/[0.02] rounded-3xl overflow-hidden border border-white/5 shadow-2xl group hover:border-cyan-500/30 hover:shadow-[0_8px_40px_rgba(34,211,238,0.15)] transition-all duration-500 backdrop-blur-sm flex flex-col">
+                  {(() => {
+                    const statusMeta = getStatusMeta(video);
+                    return (
+                      <>
                   
                   {/* Header */}
                   <div className="p-5 flex items-start justify-between border-b border-white/5 bg-black/20">
                     <div className="flex items-start space-x-3">
                       <div className="w-10 h-10 shrink-0 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold text-sm shadow-lg">U</div>
-                      <div className="space-y-1.5">
+                      <div className="space-y-2">
                         <div className="flex flex-wrap gap-2 items-center">
                           <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{MODEL_CONFIGS[video.model]?.label || video.model}</span>
+                          <span className={`text-xs font-medium rounded-md border px-2 py-1 ${statusMeta.tone}`}>{statusMeta.label}</span>
                           {video.ratio && <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{video.ratio}</span>}
                           <span className="text-xs font-medium bg-white/10 px-2 py-1 rounded-md text-white/80 border border-white/5">{video.mode === 'omni' ? '全能参考' : '首尾帧'}</span>
                           {video.duration && <span className="text-xs font-medium bg-violet-500/15 px-2 py-1 rounded-md text-violet-300 border border-violet-500/20">{video.duration}</span>}
                           {video.quality && <span className="text-xs font-medium bg-amber-500/15 px-2 py-1 rounded-md text-amber-300 border border-amber-500/20">{video.quality}</span>}
                         </div>
                         <p className="text-sm text-white/60 line-clamp-2 leading-relaxed" title={video.prompt}>{video.prompt}</p>
+                        <p className="text-[11px] text-white/40">{statusMeta.description}</p>
                         {Object.values(video.params).flat().length > 0 && (
                           <div className="flex flex-wrap gap-1.5 mt-2">
                             {Object.values(video.params).flat().map((p, i) => (
@@ -1205,7 +1238,7 @@ export default function App() {
                     ) : video.status === 'generating' ? (
                       <div className="flex flex-col items-center text-cyan-400/80">
                         <div className="w-10 h-10 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mb-4 shadow-[0_0_20px_rgba(34,211,238,0.2)]" />
-                        <span className="text-sm font-medium tracking-wider animate-pulse">AI 正在努力生成中...</span>
+                        <span className="text-sm font-medium tracking-wider animate-pulse">{video.completionId ? '流式任务生成中...' : 'AI 正在努力生成中...'}</span>
                         {video.errorMsg && <p className="mt-3 px-4 text-[11px] leading-5 text-white/45 text-center line-clamp-4">{video.errorMsg}</p>}
                       </div>
                     ) : video.status === 'completed' ? (
@@ -1253,6 +1286,9 @@ export default function App() {
                       <button className="p-2 text-white/40 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-all duration-300" onClick={() => handleDelete(video.id)} title="删除"><Trash2 className="w-4 h-4"/></button>
                     </div>
                   )}
+                      </>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
