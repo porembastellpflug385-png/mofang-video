@@ -24,12 +24,61 @@ function extractMediaUrl(data) {
     data?.data?.videos?.[0]?.video_url ||
     data?.data?.videos?.[0]?.download_url ||
     data?.data?.videos?.[0]?.content_url ||
+    data?.data?.videos?.[0]?.signed_url ||
+    data?.data?.assets?.[0]?.url ||
+    data?.data?.assets?.[0]?.download_url ||
+    data?.data?.assets?.[0]?.signed_url ||
     data?.task_result?.url ||
     data?.task_result?.video_url ||
+    data?.task_result?.videos?.[0]?.url ||
+    data?.task_result?.videos?.[0]?.video_url ||
+    data?.task_result?.videos?.[0]?.download_url ||
+    data?.task_result?.videos?.[0]?.signed_url ||
+    data?.task_result?.assets?.[0]?.url ||
+    data?.task_result?.assets?.[0]?.download_url ||
+    data?.task_result?.assets?.[0]?.signed_url ||
     data?.result?.url ||
     data?.result?.video_url ||
+    data?.result?.videos?.[0]?.url ||
+    data?.result?.videos?.[0]?.video_url ||
+    data?.result?.assets?.[0]?.url ||
     data?.output?.url ||
     data?.output?.video_url ||
+    data?.output?.videos?.[0]?.url ||
+    data?.output?.videos?.[0]?.video_url ||
+    data?.output?.assets?.[0]?.url ||
+    null
+  );
+}
+
+function extractMediaId(data) {
+  return (
+    data?.video_id ||
+    data?.file_id ||
+    data?.content_id ||
+    data?.output_id ||
+    data?.data?.video_id ||
+    data?.data?.file_id ||
+    data?.data?.content_id ||
+    data?.data?.output_id ||
+    data?.data?.video?.id ||
+    data?.data?.videos?.[0]?.id ||
+    data?.data?.assets?.[0]?.id ||
+    data?.task_result?.video_id ||
+    data?.task_result?.file_id ||
+    data?.task_result?.content_id ||
+    data?.task_result?.output_id ||
+    data?.task_result?.video?.id ||
+    data?.task_result?.videos?.[0]?.id ||
+    data?.task_result?.assets?.[0]?.id ||
+    data?.result?.video_id ||
+    data?.result?.file_id ||
+    data?.result?.videos?.[0]?.id ||
+    data?.result?.assets?.[0]?.id ||
+    data?.output?.video_id ||
+    data?.output?.file_id ||
+    data?.output?.videos?.[0]?.id ||
+    data?.output?.assets?.[0]?.id ||
     null
   );
 }
@@ -69,6 +118,64 @@ export default async function handler(req, res) {
   }
 
   try {
+    const fetchBinaryOrRedirect = async (targetId) => {
+      const contentPaths = isVeo
+        ? [`/videos/generations/${targetId}/content`, `/videos/${targetId}/content`]
+        : [`/videos/${targetId}/content`];
+
+      let contentResponse = null;
+      let contentText = '';
+
+      for (const path of contentPaths) {
+        const apiUrl = `${BASE_URL}${path}`;
+        contentResponse = await fetch(apiUrl, {
+          method: 'GET',
+          headers: { 'Authorization': API_KEY },
+          redirect: 'follow',
+        });
+
+        if (contentResponse.ok) break;
+
+        contentText = await contentResponse.text();
+        if (contentResponse.status !== 404) {
+          return {
+            ok: false,
+            status: contentResponse.status,
+            detail: contentText,
+          };
+        }
+      }
+
+      if (!contentResponse || !contentResponse.ok) {
+        return {
+          ok: false,
+          status: contentResponse?.status || 404,
+          detail: contentText,
+        };
+      }
+
+      const contentType = contentResponse.headers.get('content-type') || '';
+
+      if (contentType.includes('video') || contentType.includes('octet-stream')) {
+        res.setHeader('Content-Type', contentType);
+        const buffer = Buffer.from(await contentResponse.arrayBuffer());
+        return res.status(200).send(buffer);
+      }
+
+      try {
+        const data = await contentResponse.json();
+        const mediaUrl = extractMediaUrl(data);
+        if (mediaUrl) return res.redirect(302, mediaUrl);
+        return res.status(200).json(data);
+      } catch {
+        const text = await contentResponse.text();
+        if (/^https?:\/\//.test(text.trim())) {
+          return res.redirect(302, text.trim());
+        }
+        return res.status(200).send(text);
+      }
+    };
+
     const paths = isVeo
       ? [`/videos/generations/${videoId}/content`, `/videos/${videoId}/content`]
       : [`/videos/${videoId}/content`];
@@ -121,6 +228,10 @@ export default async function handler(req, res) {
           if (mediaUrl) {
             return res.redirect(302, mediaUrl);
           }
+          const mediaId = extractMediaId(detailData);
+          if (mediaId && mediaId !== videoId) {
+            return await fetchBinaryOrRedirect(mediaId);
+          }
         } catch {
           if (/^https?:\/\//.test(detailText.trim())) {
             return res.redirect(302, detailText.trim());
@@ -146,6 +257,10 @@ export default async function handler(req, res) {
       const data = await apiResponse.json();
       const mediaUrl = extractMediaUrl(data);
       if (mediaUrl) return res.redirect(302, mediaUrl);
+      const mediaId = extractMediaId(data);
+      if (mediaId && mediaId !== videoId) {
+        return await fetchBinaryOrRedirect(mediaId);
+      }
       return res.status(200).json(data);
     } catch {
       return res.status(200).send(await apiResponse.text());
