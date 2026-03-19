@@ -51,10 +51,19 @@ interface VideoRecord {
 
 interface GenerateRequestBody {
   model: Model;
-  messages: Array<{
+  messages?: Array<{
     role: 'user';
     content: any[];
   }>;
+  prompt?: string;
+  image?: string;
+  images?: string[];
+  first_image?: string;
+  last_image?: string;
+  aspect_ratio?: string;
+  size?: string;
+  duration?: number;
+  seconds?: number;
   stream?: boolean;
 }
 
@@ -154,6 +163,18 @@ function buildMessages(
 function buildOmniReferenceHint(imageCount: number): string {
   if (imageCount <= 0) return '';
   return Array.from({ length: imageCount }, (_, index) => `@图 ${index + 1}`).join('、');
+}
+
+function imageFileToDataUrl(image?: ImageFile | null): string | undefined {
+  if (!image) return undefined;
+  return `data:${image.mimeType};base64,${image.base64}`;
+}
+
+function parseDurationSeconds(duration?: string): number | undefined {
+  if (!duration || duration === '默认') return undefined;
+  const matched = duration.match(/\d+/);
+  if (!matched) return undefined;
+  return Number(matched[0]);
 }
 
 function extractVideoUrl(data: any): string | null {
@@ -479,12 +500,45 @@ export default function App() {
   }, []);
 
   const buildRequestBody = useCallback((): GenerateRequestBody => {
+    if (selectedModel.startsWith('veo')) {
+      const fullPrompt = buildFullPrompt(prompt, params);
+      const ratioValue = ratio !== '智能模式' ? ratio : undefined;
+      const durationSeconds = parseDurationSeconds(duration);
+      const firstImage = imageFileToDataUrl(firstFrame);
+      const lastImage = imageFileToDataUrl(lastFrame);
+      const omniImageUrls = omniImages.map(image => imageFileToDataUrl(image)).filter(Boolean) as string[];
+
+      let veoPrompt = fullPrompt;
+      if (mode === 'first-last') {
+        const ratioStr = ratioValue ? `，输出比例 ${ratioValue}` : '';
+        veoPrompt = `${lastFrame ? '根据提供的首帧和尾帧图片' : '根据提供的首帧图片'}${ratioStr}，生成视频：${fullPrompt}`;
+      } else if (mode === 'omni') {
+        const ratioStr = ratioValue ? `，输出比例 ${ratioValue}` : '';
+        veoPrompt = `根据提供的参考图片${ratioStr}，生成视频：${fullPrompt}`;
+      }
+
+      return {
+        model: selectedModel,
+        prompt: veoPrompt,
+        image: mode === 'first-last' ? firstImage : omniImageUrls[0],
+        images: mode === 'first-last'
+          ? [firstImage, lastImage].filter(Boolean) as string[]
+          : omniImageUrls,
+        first_image: firstImage,
+        last_image: lastImage,
+        aspect_ratio: ratioValue,
+        duration: durationSeconds,
+        seconds: durationSeconds,
+        stream: false,
+      };
+    }
+
     return {
       model: selectedModel,
       messages: buildMessages(prompt, selectedModel, ratio, mode, params, firstFrame, lastFrame, omniImages),
       stream: selectedModel.startsWith('sora'),
     };
-  }, [firstFrame, lastFrame, mode, omniImages, params, prompt, ratio, selectedModel]);
+  }, [duration, firstFrame, lastFrame, mode, omniImages, params, prompt, ratio, selectedModel]);
 
   const runQueuedGenerationRef = useRef<((model: Model) => void) | null>(null);
 
