@@ -1016,7 +1016,13 @@ export default function App() {
     if (!video.videoUrl) return;
     try {
       const response = await fetch(video.videoUrl);
+      if (!response.ok) {
+        throw new Error(`下载失败 (${response.status})`);
+      }
       const blob = await response.blob();
+      if (blob.size === 0) {
+        throw new Error('下载内容为空');
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = `video-${video.id}.mp4`;

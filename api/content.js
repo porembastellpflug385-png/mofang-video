@@ -5,6 +5,35 @@
  * GET {BASE}/videos/{id}/content
  */
 
+function extractMediaUrl(data) {
+  return (
+    data?.video_url ||
+    data?.url ||
+    data?.download_url ||
+    data?.content_url ||
+    data?.data?.video_url ||
+    data?.data?.url ||
+    data?.data?.download_url ||
+    data?.data?.content_url ||
+    data?.data?.video?.url ||
+    data?.data?.result?.url ||
+    data?.data?.result?.video_url ||
+    data?.data?.output?.url ||
+    data?.data?.output?.video_url ||
+    data?.data?.videos?.[0]?.url ||
+    data?.data?.videos?.[0]?.video_url ||
+    data?.data?.videos?.[0]?.download_url ||
+    data?.data?.videos?.[0]?.content_url ||
+    data?.task_result?.url ||
+    data?.task_result?.video_url ||
+    data?.result?.url ||
+    data?.result?.video_url ||
+    data?.output?.url ||
+    data?.output?.video_url ||
+    null
+  );
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -69,6 +98,36 @@ export default async function handler(req, res) {
     }
 
     if (!apiResponse || !apiResponse.ok) {
+      const detailPaths = isVeo
+        ? [`/videos/generations/${videoId}`, `/videos/${videoId}`]
+        : [`/videos/${videoId}`];
+
+      for (const path of detailPaths) {
+        const detailUrl = `${BASE_URL}${path}`;
+        const detailResponse = await fetch(detailUrl, {
+          method: 'GET',
+          headers: {
+            'Authorization': API_KEY,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        const detailText = await detailResponse.text();
+        if (!detailResponse.ok) continue;
+
+        try {
+          const detailData = JSON.parse(detailText);
+          const mediaUrl = extractMediaUrl(detailData);
+          if (mediaUrl) {
+            return res.redirect(302, mediaUrl);
+          }
+        } catch {
+          if (/^https?:\/\//.test(detailText.trim())) {
+            return res.redirect(302, detailText.trim());
+          }
+        }
+      }
+
       return res.status(apiResponse?.status || 404).json({
         error: `获取视频内容失败 (${apiResponse?.status || 404})`,
         detail: responseText.slice(0, 500),
@@ -85,7 +144,8 @@ export default async function handler(req, res) {
 
     try {
       const data = await apiResponse.json();
-      if (data.url) return res.redirect(302, data.url);
+      const mediaUrl = extractMediaUrl(data);
+      if (mediaUrl) return res.redirect(302, mediaUrl);
       return res.status(200).json(data);
     } catch {
       return res.status(200).send(await apiResponse.text());
