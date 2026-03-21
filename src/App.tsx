@@ -237,6 +237,12 @@ function getVeoApiModel(selectedModel: Model, mode: GenerationMode): string {
   return selectedModel === 'veo3.1-4k' ? 'veo3.1-pro' : 'veo3.1';
 }
 
+function getGrokAspectRatio(ratio: Ratio): '2:3' | '3:2' | '1:1' {
+  if (ratio === '9:16' || ratio === '3:4') return '2:3';
+  if (ratio === '1:1') return '1:1';
+  return '3:2';
+}
+
 async function parseApiResponse(res: Response): Promise<any> {
   const text = await res.text();
   if (!text) return {};
@@ -674,6 +680,24 @@ export default function App() {
       };
     }
 
+    if (selectedModel.startsWith('grok')) {
+      const fullPrompt = buildFullPrompt(prompt, params);
+      const firstImage = imageFileToDataUrl(firstFrame);
+      const lastImage = imageFileToDataUrl(lastFrame);
+      const omniImageUrls = omniImages.map(image => imageFileToDataUrl(image)).filter(Boolean) as string[];
+
+      return {
+        model: 'grok-video-3',
+        prompt: `${fullPrompt} --mode=custom`,
+        aspect_ratio: getGrokAspectRatio(ratio),
+        size: '720P',
+        images: mode === 'first-last'
+          ? [firstImage, lastImage].filter(Boolean) as string[]
+          : omniImageUrls,
+        stream: false,
+      };
+    }
+
     return {
       model: selectedModel,
       messages: buildMessages(prompt, selectedModel, ratio, mode, params, firstFrame, lastFrame, omniImages),
@@ -1081,6 +1105,10 @@ export default function App() {
     if (mode === 'omni' && omniImages.length === 0) { addToast('error', '请至少上传一张参考图'); return; }
     if (selectedModel.startsWith('veo') && mode === 'omni' && omniImages.length > 3) {
       addToast('error', 'Veo 全能参考模式最多支持 3 张参考图');
+      return;
+    }
+    if (selectedModel.startsWith('grok') && mode === 'omni' && omniImages.length > 3) {
+      addToast('error', 'Grok 当前最多支持 3 张参考图');
       return;
     }
     if (!prompt.trim()) { addToast('error', '请输入提示词'); return; }

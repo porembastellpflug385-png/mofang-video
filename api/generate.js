@@ -14,6 +14,7 @@ export const config = {
 function getApiConfigForModel(model = '') {
   const isSora = model.startsWith('sora');
   const isVeo = model.startsWith('veo');
+  const isGrok = model.startsWith('grok');
 
   if (isSora) {
     return {
@@ -45,6 +46,26 @@ function getApiConfigForModel(model = '') {
       generateUrl:
         process.env.VEO_GENERATE_URL ||
         'https://ai.t8star.cn/v2/videos/generations',
+      authMode: 'raw',
+    };
+  }
+
+  if (isGrok) {
+    return {
+      baseUrl:
+        process.env.GROK_OPENAI_BASE_URL ||
+        process.env.GROK_API_BASE_URL ||
+        process.env.OPENAI_BASE_URL ||
+        process.env.API_BASE_URL,
+      apiKey:
+        process.env.GROK_OPENAI_API_KEY ||
+        process.env.GROK_API_KEY ||
+        process.env.OPENAI_API_KEY ||
+        process.env.API_KEY,
+      generateUrl:
+        process.env.GROK_GENERATE_URL ||
+        `${process.env.GROK_OPENAI_BASE_URL || process.env.GROK_API_BASE_URL || process.env.OPENAI_BASE_URL || process.env.API_BASE_URL || ''}/video/create`,
+      authMode: 'bearer',
     };
   }
 
@@ -52,6 +73,7 @@ function getApiConfigForModel(model = '') {
     baseUrl: process.env.OPENAI_BASE_URL || process.env.API_BASE_URL,
     apiKey: process.env.OPENAI_API_KEY || process.env.API_KEY,
     generateUrl: null,
+    authMode: 'raw',
   };
 }
 
@@ -83,10 +105,10 @@ export default async function handler(req, res) {
   try {
     const body = req.body;
     const model = body.model || '';
-    const { baseUrl: BASE_URL, apiKey: API_KEY, generateUrl } = getApiConfigForModel(model);
+    const { baseUrl: BASE_URL, apiKey: API_KEY, generateUrl, authMode } = getApiConfigForModel(model);
 
     if (!BASE_URL || !API_KEY) {
-      const envPrefix = model.startsWith('sora') ? 'SORA_' : model.startsWith('veo') ? 'VEO_' : '默认';
+      const envPrefix = model.startsWith('sora') ? 'SORA_' : model.startsWith('veo') ? 'VEO_' : model.startsWith('grok') ? 'GROK_' : '默认';
       return res.status(500).json({ error: `服务端配置错误，请检查 ${envPrefix} 环境变量` });
     }
 
@@ -100,7 +122,8 @@ export default async function handler(req, res) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': API_KEY,
+        'Accept': 'application/json',
+        'Authorization': authMode === 'bearer' ? `Bearer ${API_KEY}` : API_KEY,
       },
       body: JSON.stringify(body),
       signal: controller.signal,
