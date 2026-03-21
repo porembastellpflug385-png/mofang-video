@@ -687,7 +687,7 @@ export default function App() {
       const omniImageUrls = omniImages.map(image => imageFileToDataUrl(image)).filter(Boolean) as string[];
 
       return {
-        model: 'grok-video-3',
+        model: selectedModel,
         prompt: `${fullPrompt} --mode=custom`,
         aspect_ratio: getGrokAspectRatio(ratio),
         size: '720P',
